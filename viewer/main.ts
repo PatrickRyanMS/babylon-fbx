@@ -76,6 +76,8 @@ interface ModelEntry {
     textures: { slot: string; url: string; materialName?: string }[];
     /** Name of the animation clip to auto-play on load (defaults to first clip) */
     defaultAnimation?: string;
+    /** Force all materials to opaque (fixes z-fighting from erroneous transparency) */
+    forceOpaque?: boolean;
 }
 
 const models: ModelEntry[] = [
@@ -121,6 +123,7 @@ const models: ModelEntry[] = [
         name: "Phoenix Bird (animated)",
         url: phoenixFbxUrl,
         format: "fbx",
+        forceOpaque: true,
         textures: [
             { slot: "diffuse", url: phoenixDiffAUrl },
             { slot: "emissive", url: phoenixEmissAUrl },
@@ -323,6 +326,17 @@ async function loadModel(index: number) {
             for (const mat of scene.materials) {
                 if (mat instanceof StandardMaterial) {
                     applyTextures(mat, model.textures);
+                }
+            }
+
+            // Force opaque materials for models with z-fighting issues
+            if (model.forceOpaque) {
+                for (const mat of scene.materials) {
+                    if (mat instanceof StandardMaterial) {
+                        mat.transparencyMode = 0; // OPAQUE
+                        mat.alpha = 1;
+                        mat.opacityTexture = null;
+                    }
                 }
             }
         }

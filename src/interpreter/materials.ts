@@ -37,6 +37,14 @@ export interface FBXTextureRef {
     id: bigint;
     /** Embedded texture data (from Video node Content), if available */
     embeddedData: Uint8Array | null;
+    /** UV translation [u, v] */
+    uvTranslation?: [number, number];
+    /** UV scaling [u, v] */
+    uvScaling?: [number, number];
+    /** UV rotation in degrees */
+    uvRotation?: number;
+    /** Which UV set index this texture uses */
+    uvSetIndex?: number;
 }
 
 /**
@@ -134,6 +142,29 @@ function extractTextures(materialId: bigint, objectMap: FBXObjectMap): FBXTextur
             ? (getPropertyValue<string>(relFileNameNode, 0) ?? "")
             : "";
 
+        // Extract UV transform properties
+        let uvTranslation: [number, number] | undefined;
+        let uvScaling: [number, number] | undefined;
+        let uvRotation: number | undefined;
+        const texProps70 = findChildByName(node, "Properties70");
+        if (texProps70) {
+            for (const p of texProps70.children) {
+                if (p.name !== "P") continue;
+                const pName = getPropertyValue<string>(p, 0);
+                if (pName === "UVTranslation" || pName === "Translation") {
+                    const u = toNumber(p.properties[4]?.value);
+                    const v = toNumber(p.properties[5]?.value);
+                    if (u !== undefined && v !== undefined) uvTranslation = [u, v];
+                } else if (pName === "UVScaling" || pName === "Scaling") {
+                    const u = toNumber(p.properties[4]?.value);
+                    const v = toNumber(p.properties[5]?.value);
+                    if (u !== undefined && v !== undefined) uvScaling = [u, v];
+                } else if (pName === "UVRotation" || pName === "Rotation") {
+                    uvRotation = toNumber(p.properties[4]?.value);
+                }
+            }
+        }
+
         // Check for embedded texture data in connected Video node
         let embeddedData: Uint8Array | null = null;
         const videoChildren = getChildren(objectMap, id, "Video");
@@ -155,6 +186,9 @@ function extractTextures(materialId: bigint, objectMap: FBXObjectMap): FBXTextur
             relativeFileName,
             id,
             embeddedData,
+            uvTranslation,
+            uvScaling,
+            uvRotation,
         });
     }
 

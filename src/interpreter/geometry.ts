@@ -1,5 +1,13 @@
 import type { FBXNode } from "../types/fbxTypes.js";
-import { findChildByName, getPropertyValue, cleanFBXName } from "../types/fbxTypes.js";
+import { findChildByName, findChildrenByName, getPropertyValue, cleanFBXName } from "../types/fbxTypes.js";
+
+/** A named UV set */
+export interface FBXUVSet {
+    /** UV set name (e.g. "UVMap", "lightmap") */
+    name: string;
+    /** Per-vertex UV data [u,v, ...] (expanded to match triangle vertices) */
+    data: Float64Array;
+}
 
 /** Parsed geometry data ready for Babylon consumption */
 export interface FBXGeometryData {
@@ -13,8 +21,12 @@ export interface FBXGeometryData {
     indices: Uint32Array;
     /** Per-vertex normals [x,y,z, ...] (expanded to match triangle vertices) */
     normals: Float64Array | null;
-    /** Per-vertex UVs [u,v, ...] (expanded to match triangle vertices) */
+    /** Per-vertex UVs [u,v, ...] (expanded to match triangle vertices) — first UV set for convenience */
     uvs: Float64Array | null;
+    /** All UV sets (including the first) */
+    uvSets: FBXUVSet[];
+    /** Per-vertex colors [r,g,b,a, ...] (expanded to match triangle vertices) */
+    colors: Float32Array | null;
     /** Control point index for each polygon-vertex (for skinning lookup) */
     controlPointIndices: Uint32Array | null;
     /** Per-triangle material index (which material each triangle belongs to) */
@@ -58,11 +70,40 @@ export function extractGeometry(geometryNode: FBXNode, nodeId: bigint): FBXGeome
         normals = expandLayerElement(normalNode, "Normals", "NormalsIndex", polyVertexList, rawPositions.length / 3, 3);
     }
 
-    // Extract UVs
-    const uvNode = findChildByName(geometryNode, "LayerElementUV");
-    let uvs: Float64Array | null = null;
-    if (uvNode) {
-        uvs = expandLayerElement(uvNode, "UV", "UVIndex", polyVertexList, rawPositions.length / 3, 2);
+    // Extract all UV sets
+    const uvNodes = findChildrenByName(geometryNode, "LayerElementUV");
+    const uvSets: FBXUVSet[] = [];
+    for (const uvNode of uvNodes) {
+        const nameNode = findChildByName(uvNode, "Name");
+        const setName = nameNode ? (getPropertyValue<string>(nameNode, 0) ?? `UVSet${uvSets.length}`) : `UVSet${uvSets.length}`;
+        const data = expandLayerElement(uvNode, "UV", "UVIndex", polyVertexList, rawPositions.length / 3, 2);
+        if (data) {
+            uvSets.push({ name: setName, data });
+        }
+    }
+    const uvs = uvSets.length > 0 ? uvSets[0].data : null;
+
+    // Extract vertex colors
+    const colorNode = findChildByName(geometryNode, "LayerElementColor");
+    let colors: Float32Array | null = null;
+    if (colorNode) {
+        const colorData = expandLayerElement(colorNode, "Colors", "ColorIndex", polyVertexList, rawPositions.length / 3, 4);
+        if (colorData) {
+            colors = new Float32Array(colorData.length);
+            for (let i = 0; i < colorData.length; i++) {
+                colors[i] = colorData[i];
+            }
+        }
+    }
+
+    // Extract smoothing groups (per-polygon)
+    const smoothingNode = findChildByName(geometryNode, "LayerElementSmoothing");
+    let smoothingGroups: Int32Array | null = null;
+    if (smoothingNode) {
+        const smoothingDataNode = findChildByName(smoothingNode, "Smoothing");
+        if (smoothingDataNode) {
+            smoothingGroups = toInt32Array(smoothingDataNode.properties[0].value);
+        }
     }
 
     // Extract per-polygon material indices
@@ -73,7 +114,7 @@ export function extractGeometry(geometryNode: FBXNode, nodeId: bigint): FBXGeome
     }
 
     // Build final indexed mesh with expanded per-triangle-vertex attributes
-    const result = buildTriangleMesh(rawPositions, triangles, polyVertexList, normals, uvs);
+    const result = buildTriangleMesh(rawPositions, triangles, polyVertexList, normals, uvs, uvSets, colors);
 
     // Expand per-polygon material indices to per-triangle
     let materialIndices: Int32Array | null = null;
@@ -106,6 +147,8 @@ export function extractGeometry(geometryNode: FBXNode, nodeId: bigint): FBXGeome
         indices: result.indices,
         normals: result.normals,
         uvs: result.uvs,
+        uvSets: result.uvSets,
+        colors: result.colors,
         controlPointIndices: result.controlPointIndices,
         materialIndices,
     };
@@ -293,6 +336,8 @@ interface TriangleMeshData {
     indices: Uint32Array;
     normals: Float64Array | null;
     uvs: Float64Array | null;
+    uvSets: FBXUVSet[];
+    colors: Float32Array | null;
     controlPointIndices: Uint32Array;
 }
 
@@ -305,7 +350,9 @@ function buildTriangleMesh(
     triangles: number[][],
     polyVertexList: PolyVertex[],
     expandedNormals: Float64Array | null,
-    expandedUVs: Float64Array | null
+    expandedUVs: Float64Array | null,
+    expandedUVSets: FBXUVSet[],
+    expandedColors: Float32Array | null
 ): TriangleMeshData {
     // Each polygon-vertex becomes a unique vertex in the output
     const vertexCount = polyVertexList.length;
@@ -340,6 +387,8 @@ function buildTriangleMesh(
         indices,
         normals: expandedNormals,
         uvs: expandedUVs,
+        uvSets: expandedUVSets,
+        colors: expandedColors,
         controlPointIndices,
     };
 }

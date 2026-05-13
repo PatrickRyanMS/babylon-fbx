@@ -32,14 +32,28 @@ export interface FBXCurveNodeData {
     curves: FBXCurveData[];
 }
 
+/** Animation layer with blend mode info */
+export interface FBXAnimationLayerData {
+    /** Layer name */
+    name: string;
+    /** Layer weight (0-100, default 100) */
+    weight: number;
+    /** Blend mode: 0=Additive, 1=Override, 2=OverridePassthrough */
+    blendMode: number;
+    /** Curve nodes in this layer */
+    curveNodes: FBXCurveNodeData[];
+}
+
 /** One animation clip (AnimationStack) */
 export interface FBXAnimationStackData {
     /** Animation name */
     name: string;
     /** Duration in seconds */
     duration: number;
-    /** Per-bone curve nodes */
+    /** Per-bone curve nodes (flattened from all layers for backward compat) */
     curveNodes: FBXCurveNodeData[];
+    /** Animation layers (preserves blend mode info) */
+    layers: FBXAnimationLayerData[];
 }
 
 /**
@@ -66,17 +80,40 @@ function extractAnimStack(
     const name = cleanFBXName(getPropertyValue<string>(stackNode, 1) ?? "Animation");
 
     // Find AnimationLayer children of this stack
-    const layers = getChildren(objectMap, stackId, "AnimationLayer");
-    if (layers.length === 0) return null;
+    const layerEntries = getChildren(objectMap, stackId, "AnimationLayer");
+    if (layerEntries.length === 0) return null;
 
     // Collect all CurveNodes from all layers
-    const curveNodes: FBXCurveNodeData[] = [];
+    const allCurveNodes: FBXCurveNodeData[] = [];
+    const layers: FBXAnimationLayerData[] = [];
     let minTime = Infinity;
     let maxTime = 0;
 
-    for (const { id: layerId } of layers) {
+    for (const { id: layerId, node: layerNode } of layerEntries) {
+        // Extract layer properties
+        let layerName = cleanFBXName(getPropertyValue<string>(layerNode, 1) ?? "Layer");
+        let weight = 100;
+        let blendMode = 0;
+
+        const props70 = findChildByName(layerNode, "Properties70");
+        if (props70) {
+            for (const p of props70.children) {
+                if (p.name !== "P") continue;
+                const pName = getPropertyValue<string>(p, 0);
+                if (pName === "Weight") {
+                    const v = p.properties[4]?.value;
+                    if (typeof v === "number") weight = v;
+                } else if (pName === "BlendMode") {
+                    const v = p.properties[4]?.value;
+                    if (typeof v === "number") blendMode = v;
+                    else if (typeof v === "bigint") blendMode = Number(v);
+                }
+            }
+        }
+
         // AnimationCurveNodes are children of the layer
         const curveNodeEntries = getChildren(objectMap, layerId, "AnimationCurveNode");
+        const layerCurveNodes: FBXCurveNodeData[] = [];
 
         for (const { id: curveNodeId, node: curveNodeNode } of curveNodeEntries) {
             const curveNodeData = extractCurveNode(curveNodeId, curveNodeNode, objectMap);
@@ -89,15 +126,23 @@ function extractAnimStack(
                 }
             }
 
-            curveNodes.push(curveNodeData);
+            layerCurveNodes.push(curveNodeData);
+            allCurveNodes.push(curveNodeData);
         }
+
+        layers.push({
+            name: layerName,
+            weight,
+            blendMode,
+            curveNodes: layerCurveNodes,
+        });
     }
 
-    if (curveNodes.length === 0) return null;
+    if (allCurveNodes.length === 0) return null;
 
     // Rebase all keyframe times so the animation starts at 0
     if (minTime > 0 && isFinite(minTime)) {
-        for (const cn of curveNodes) {
+        for (const cn of allCurveNodes) {
             for (const curve of cn.curves) {
                 for (const key of curve.keys) {
                     key.time -= minTime;
@@ -110,7 +155,8 @@ function extractAnimStack(
     return {
         name,
         duration: maxTime,
-        curveNodes,
+        curveNodes: allCurveNodes,
+        layers,
     };
 }
 
@@ -121,26 +167,37 @@ function extractCurveNode(
 ): FBXCurveNodeData | null {
     const typeName = cleanFBXName(getPropertyValue<string>(curveNodeNode, 1) ?? "");
 
-    // Only process T (translation), R (rotation), S (scale)
-    if (typeName !== "T" && typeName !== "R" && typeName !== "S") {
-        return null;
+    // Handle T (translation), R (rotation), S (scale) targeting Models
+    if (typeName === "T" || typeName === "R" || typeName === "S") {
+        const targetModelId = findCurveNodeTarget(curveNodeId, objectMap);
+        if (targetModelId === null) return null;
+
+        const curves = extractCurves(curveNodeId, objectMap);
+        if (curves.length === 0) return null;
+
+        return {
+            type: typeName,
+            targetModelId,
+            curves,
+        };
     }
 
-    // Find the target model via OP connection (CurveNode → Model)
-    // The CurveNode connects to a Model via OP with property name like "Lcl Translation"
-    const targetModelId = findCurveNodeTarget(curveNodeId, objectMap);
-    if (targetModelId === null) return null;
+    // Handle DeformPercent targeting BlendShapeChannels
+    if (typeName === "DeformPercent") {
+        const targetId = findCurveNodeBlendShapeTarget(curveNodeId, objectMap);
+        if (targetId === null) return null;
 
-    // Find AnimationCurve children connected via OP with channel name
-    const curves = extractCurves(curveNodeId, objectMap);
+        const curves = extractCurves(curveNodeId, objectMap);
+        if (curves.length === 0) return null;
 
-    if (curves.length === 0) return null;
+        return {
+            type: "DeformPercent",
+            targetModelId: targetId,
+            curves,
+        };
+    }
 
-    return {
-        type: typeName,
-        targetModelId,
-        curves,
-    };
+    return null;
 }
 
 /**
@@ -155,6 +212,36 @@ function findCurveNodeTarget(curveNodeId: bigint, objectMap: FBXObjectMap): bigi
             const parentNode = objectMap.objects.get(conn.parentId);
             if (parentNode && parentNode.name === "Model") {
                 return conn.parentId;
+            }
+        }
+    }
+    return null;
+}
+
+/**
+ * Find the BlendShapeChannel that a DeformPercent AnimationCurveNode targets.
+ */
+function findCurveNodeBlendShapeTarget(curveNodeId: bigint, objectMap: FBXObjectMap): bigint | null {
+    for (const conn of objectMap.connections) {
+        if (conn.childId === curveNodeId && conn.type === "OP") {
+            const parentNode = objectMap.objects.get(conn.parentId);
+            if (parentNode && parentNode.name === "Deformer") {
+                const subType = getPropertyValue<string>(parentNode, 2);
+                if (subType === "BlendShapeChannel") {
+                    return conn.parentId;
+                }
+            }
+        }
+    }
+    // Also check OO connections
+    for (const conn of objectMap.connections) {
+        if (conn.childId === curveNodeId && conn.type === "OO") {
+            const parentNode = objectMap.objects.get(conn.parentId);
+            if (parentNode && parentNode.name === "Deformer") {
+                const subType = getPropertyValue<string>(parentNode, 2);
+                if (subType === "BlendShapeChannel") {
+                    return conn.parentId;
+                }
             }
         }
     }

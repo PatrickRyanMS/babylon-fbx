@@ -1,10 +1,11 @@
 import type { FBXDocument, FBXNode } from "../types/fbxTypes.js";
-import { findDocumentNode, getPropertyValue, cleanFBXName } from "../types/fbxTypes.js";
+import { findDocumentNode, findChildByName, getPropertyValue, cleanFBXName } from "../types/fbxTypes.js";
 import { resolveConnections, getChildren, type FBXObjectMap } from "./connections.js";
 import { extractGeometry, type FBXGeometryData } from "./geometry.js";
 import { extractMaterial, type FBXMaterialData } from "./materials.js";
 import { extractSkins, type FBXSkinData } from "./skeleton.js";
 import { extractAnimations, type FBXAnimationStackData } from "./animation.js";
+import { extractBlendShapes, type FBXBlendShapeData } from "./blendShapes.js";
 
 /** Represents a model (transform node) in the FBX scene */
 export interface FBXModelData {
@@ -41,6 +42,42 @@ export interface FBXModelData {
     rotationOrder: number;
     /** Whether backface culling is disabled ("CullingOff") */
     cullingOff: boolean;
+    /** User-defined custom properties from Properties70 */
+    customProperties?: Record<string, string | number | boolean>;
+}
+
+/** Camera data extracted from FBX */
+export interface FBXCameraData {
+    /** Model ID this camera is attached to */
+    modelId: bigint;
+    /** Camera name */
+    name: string;
+    /** Field of view in degrees */
+    fieldOfView: number;
+    /** Near clip plane */
+    nearPlane: number;
+    /** Far clip plane */
+    farPlane: number;
+    /** Aspect ratio (width/height), 0 = use viewport */
+    aspectRatio: number;
+}
+
+/** Light data extracted from FBX */
+export interface FBXLightData {
+    /** Model ID this light is attached to */
+    modelId: bigint;
+    /** Light name */
+    name: string;
+    /** Light type: 0=Point, 1=Directional, 2=Spot */
+    lightType: number;
+    /** Color [r,g,b] 0-1 */
+    color: [number, number, number];
+    /** Intensity multiplier */
+    intensity: number;
+    /** Cone angle in degrees (for spot lights) */
+    coneAngle: number;
+    /** Decay type: 0=None, 1=Linear, 2=Quadratic */
+    decayType: number;
 }
 
 /** Result of interpreting an FBX document */
@@ -53,8 +90,14 @@ export interface FBXSceneData {
     materials: FBXMaterialData[];
     /** Skin deformers (skeletons + vertex weights) */
     skins: FBXSkinData[];
+    /** Blend shape deformers (morph targets) */
+    blendShapes: FBXBlendShapeData[];
     /** Animation stacks (clips) */
     animations: FBXAnimationStackData[];
+    /** Cameras */
+    cameras: FBXCameraData[];
+    /** Lights */
+    lights: FBXLightData[];
     /** Global settings */
     upAxis: number;
     upAxisSign: number;
@@ -96,8 +139,15 @@ export function interpretFBX(doc: FBXDocument): FBXSceneData {
     // Extract skeleton/skinning data
     const skins = extractSkins(objectMap);
 
+    // Extract blend shape data
+    const blendShapes = extractBlendShapes(objectMap);
+
     // Extract animation data
     const animations = extractAnimations(objectMap);
+
+    // Extract cameras and lights from NodeAttribute objects
+    const cameras = extractCameras(objectMap);
+    const lights = extractLights(objectMap);
 
     // Build model hierarchy
     const rootModels = buildModelHierarchy(objectMap, geometries, materials);
@@ -107,7 +157,10 @@ export function interpretFBX(doc: FBXDocument): FBXSceneData {
         geometries,
         materials,
         skins,
+        blendShapes,
         animations,
+        cameras,
+        lights,
         ...globalSettings,
     };
 }
@@ -181,6 +234,9 @@ function buildModel(
         ? getPropertyValue<string>(cullingNode, 0) === "CullingOff"
         : false;
 
+    // Extract user-defined custom properties
+    const customProperties = extractCustomProperties(modelNode);
+
     return {
         id: modelId,
         name,
@@ -189,6 +245,7 @@ function buildModel(
         materials: modelMaterials,
         children,
         cullingOff,
+        customProperties,
         ...transform,
     };
 }
@@ -361,6 +418,201 @@ function extractGlobalSettings(doc: FBXDocument): GlobalSettings {
     }
 
     return defaults;
+}
+
+// ── Cameras & Lights ──────────────────────────────────────────────────────────
+
+const SYSTEM_PROPERTIES = new Set([
+    "Lcl Translation", "Lcl Rotation", "Lcl Scaling",
+    "PreRotation", "PostRotation", "RotationPivot", "ScalingPivot",
+    "RotationOffset", "ScalingOffset", "RotationOrder",
+    "GeometricTranslation", "GeometricRotation", "GeometricScaling",
+    "Visibility", "InheritType", "ScalingMax", "DefaultAttributeIndex",
+    "currentUVSet", "lockInfluenceWeights",
+]);
+
+function extractCustomProperties(modelNode: FBXNode): Record<string, string | number | boolean> | undefined {
+    const props70 = findChildByName(modelNode, "Properties70");
+    if (!props70) return undefined;
+
+    const custom: Record<string, string | number | boolean> = {};
+    let hasAny = false;
+
+    for (const p of props70.children) {
+        if (p.name !== "P") continue;
+        const propName = getPropertyValue<string>(p, 0);
+        if (!propName || SYSTEM_PROPERTIES.has(propName)) continue;
+
+        // Check type flag (property[1]) — "U" prefix indicates user-defined
+        const typeFlag = getPropertyValue<string>(p, 1) ?? "";
+        // Accept user-defined properties (type starts with something other than standard types)
+        // Standard FBX types: "KString", "Number", "double", "int", "bool", "Lcl"...
+        // User properties often have types like "KString", but are in the UDP (User Defined Properties) section
+        // Heuristic: if not in SYSTEM_PROPERTIES set, it's user-defined
+        const val = p.properties[4]?.value;
+        if (val === undefined) continue;
+
+        if (typeof val === "string") {
+            custom[propName] = val;
+            hasAny = true;
+        } else if (typeof val === "number") {
+            custom[propName] = val;
+            hasAny = true;
+        } else if (typeof val === "bigint") {
+            custom[propName] = Number(val);
+            hasAny = true;
+        } else if (typeof val === "boolean") {
+            custom[propName] = val;
+            hasAny = true;
+        }
+    }
+
+    return hasAny ? custom : undefined;
+}
+
+function extractCameras(objectMap: FBXObjectMap): FBXCameraData[] {
+    const cameras: FBXCameraData[] = [];
+
+    for (const [id, node] of objectMap.objects) {
+        if (node.name !== "NodeAttribute") continue;
+        const subType = getPropertyValue<string>(node, 2);
+        if (subType !== "Camera") continue;
+
+        // Find the model this camera is attached to (parent)
+        const parent = objectMap.parentOf.get(id);
+        if (!parent) continue;
+        const parentNode = objectMap.objects.get(parent.id);
+        if (!parentNode || parentNode.name !== "Model") continue;
+
+        const name = cleanFBXName(getPropertyValue<string>(parentNode, 1) ?? "Camera");
+
+        let fieldOfView = 45;
+        let nearPlane = 0.1;
+        let farPlane = 10000;
+        let aspectRatio = 0;
+
+        const props70 = findChildByName(node, "Properties70");
+        if (props70) {
+            for (const p of props70.children) {
+                if (p.name !== "P") continue;
+                const pName = getPropertyValue<string>(p, 0);
+                const val = toNumber(p.properties[4]?.value);
+                if (val === undefined) continue;
+
+                switch (pName) {
+                    case "FieldOfView":
+                    case "FieldOfViewX":
+                    case "FieldOfViewY":
+                        fieldOfView = val;
+                        break;
+                    case "NearPlane":
+                        nearPlane = val;
+                        break;
+                    case "FarPlane":
+                        farPlane = val;
+                        break;
+                    case "AspectWidth":
+                        // Will compute aspect later if AspectHeight also present
+                        aspectRatio = val;
+                        break;
+                    case "AspectHeight":
+                        if (aspectRatio > 0) aspectRatio = aspectRatio / val;
+                        break;
+                    case "FilmAspectRatio":
+                        aspectRatio = val;
+                        break;
+                }
+            }
+        }
+
+        cameras.push({
+            modelId: parent.id,
+            name,
+            fieldOfView,
+            nearPlane,
+            farPlane,
+            aspectRatio,
+        });
+    }
+
+    return cameras;
+}
+
+function extractLights(objectMap: FBXObjectMap): FBXLightData[] {
+    const lights: FBXLightData[] = [];
+
+    for (const [id, node] of objectMap.objects) {
+        if (node.name !== "NodeAttribute") continue;
+        const subType = getPropertyValue<string>(node, 2);
+        if (subType !== "Light") continue;
+
+        // Find the model this light is attached to
+        const parent = objectMap.parentOf.get(id);
+        if (!parent) continue;
+        const parentNode = objectMap.objects.get(parent.id);
+        if (!parentNode || parentNode.name !== "Model") continue;
+
+        const name = cleanFBXName(getPropertyValue<string>(parentNode, 1) ?? "Light");
+
+        let lightType = 0; // Point
+        let color: [number, number, number] = [1, 1, 1];
+        let intensity = 1;
+        let coneAngle = 45;
+        let decayType = 2; // Quadratic
+
+        const props70 = findChildByName(node, "Properties70");
+        if (props70) {
+            for (const p of props70.children) {
+                if (p.name !== "P") continue;
+                const pName = getPropertyValue<string>(p, 0);
+
+                switch (pName) {
+                    case "LightType": {
+                        const val = toNumber(p.properties[4]?.value);
+                        if (val !== undefined) lightType = val;
+                        break;
+                    }
+                    case "Color": {
+                        const r = toNumber(p.properties[4]?.value);
+                        const g = toNumber(p.properties[5]?.value);
+                        const b = toNumber(p.properties[6]?.value);
+                        if (r !== undefined && g !== undefined && b !== undefined) {
+                            color = [r, g, b];
+                        }
+                        break;
+                    }
+                    case "Intensity": {
+                        const val = toNumber(p.properties[4]?.value);
+                        if (val !== undefined) intensity = val / 100; // FBX uses 0-100
+                        break;
+                    }
+                    case "InnerAngle":
+                    case "ConeAngle": {
+                        const val = toNumber(p.properties[4]?.value);
+                        if (val !== undefined) coneAngle = val;
+                        break;
+                    }
+                    case "DecayType": {
+                        const val = toNumber(p.properties[4]?.value);
+                        if (val !== undefined) decayType = val;
+                        break;
+                    }
+                }
+            }
+        }
+
+        lights.push({
+            modelId: parent.id,
+            name,
+            lightType,
+            color,
+            intensity,
+            coneAngle,
+            decayType,
+        });
+    }
+
+    return lights;
 }
 
 // ── Utilities ──────────────────────────────────────────────────────────────────
