@@ -17,6 +17,8 @@ export interface FBXGeometryData {
     uvs: Float64Array | null;
     /** Control point index for each polygon-vertex (for skinning lookup) */
     controlPointIndices: Uint32Array | null;
+    /** Per-triangle material index (which material each triangle belongs to) */
+    materialIndices: Int32Array | null;
 }
 
 /**
@@ -63,8 +65,39 @@ export function extractGeometry(geometryNode: FBXNode, nodeId: bigint): FBXGeome
         uvs = expandLayerElement(uvNode, "UV", "UVIndex", polyVertexList, rawPositions.length / 3, 2);
     }
 
+    // Extract per-polygon material indices
+    const matNode = findChildByName(geometryNode, "LayerElementMaterial");
+    let polyMaterialIndices: Int32Array | null = null;
+    if (matNode) {
+        polyMaterialIndices = extractMaterialIndices(matNode, polygons.length);
+    }
+
     // Build final indexed mesh with expanded per-triangle-vertex attributes
     const result = buildTriangleMesh(rawPositions, triangles, polyVertexList, normals, uvs);
+
+    // Expand per-polygon material indices to per-triangle
+    let materialIndices: Int32Array | null = null;
+    if (polyMaterialIndices) {
+        // Check if all polygons use the same material (optimization)
+        let allSame = true;
+        const firstMat = polyMaterialIndices[0];
+        for (let i = 1; i < polyMaterialIndices.length; i++) {
+            if (polyMaterialIndices[i] !== firstMat) { allSame = false; break; }
+        }
+
+        if (!allSame) {
+            // Expand to per-triangle (fan triangulation: polygon with N verts → N-2 triangles)
+            const triCount = result.indices.length / 3;
+            materialIndices = new Int32Array(triCount);
+            let triIdx = 0;
+            for (let pi = 0; pi < polygons.length; pi++) {
+                const numTris = polygons[pi].indices.length - 2;
+                for (let t = 0; t < numTris; t++) {
+                    materialIndices[triIdx++] = polyMaterialIndices[pi];
+                }
+            }
+        }
+    }
 
     return {
         id: nodeId,
@@ -74,6 +107,7 @@ export function extractGeometry(geometryNode: FBXNode, nodeId: bigint): FBXGeome
         normals: result.normals,
         uvs: result.uvs,
         controlPointIndices: result.controlPointIndices,
+        materialIndices,
     };
 }
 
@@ -151,6 +185,38 @@ function buildPolygonVertexList(polygons: Polygon[]): PolyVertex[] {
 }
 
 // ── Layer Element Expansion ────────────────────────────────────────────────────
+
+/**
+ * Extract per-polygon material indices from LayerElementMaterial.
+ * Returns an Int32Array with one material index per polygon.
+ */
+function extractMaterialIndices(matNode: FBXNode, polygonCount: number): Int32Array | null {
+    const mappingNode = findChildByName(matNode, "MappingInformationType");
+    const referenceNode = findChildByName(matNode, "ReferenceInformationType");
+
+    if (!mappingNode || !referenceNode) return null;
+
+    const mapping = getPropertyValue<string>(mappingNode, 0) ?? "";
+    const reference = getPropertyValue<string>(referenceNode, 0) ?? "";
+
+    if (mapping === "AllSame") {
+        // All polygons use material index 0
+        const indices = new Int32Array(polygonCount);
+        return indices; // already filled with 0
+    }
+
+    if (mapping === "ByPolygon") {
+        const materialsNode = findChildByName(matNode, "Materials");
+        if (!materialsNode) return null;
+        const rawIndices = toInt32Array(materialsNode.properties[0].value);
+        // For Direct reference, the Materials array has one index per polygon
+        if (reference === "Direct" || reference === "IndexToDirect") {
+            return rawIndices;
+        }
+    }
+
+    return null;
+}
 
 function expandLayerElement(
     layerNode: FBXNode,

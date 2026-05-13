@@ -12,6 +12,10 @@ import type { ISceneLoaderAsyncResult } from "@babylonjs/core/Loading/sceneLoade
 // PBR material support (required for GLB/glTF models)
 import "@babylonjs/core/Materials/PBR/pbrMaterial.js";
 
+// Shader support for image processing and environment textures
+import "@babylonjs/core/Shaders/rgbdDecode.fragment.js";
+import "@babylonjs/core/Shaders/postprocess.vertex.js";
+
 // GLTF loader for GLB reference models
 import "@babylonjs/loaders/glTF/2.0/index.js";
 
@@ -70,6 +74,8 @@ interface ModelEntry {
     format: "fbx" | "glb";
     /** Map of texture slot → resolved URL. Slots: "diffuse", "normal", "emissive", etc. */
     textures: { slot: string; url: string; materialName?: string }[];
+    /** Name of the animation clip to auto-play on load (defaults to first clip) */
+    defaultAnimation?: string;
 }
 
 const models: ModelEntry[] = [
@@ -77,6 +83,7 @@ const models: ModelEntry[] = [
         name: "Spider (FBX, animated)",
         url: spiderFbxUrl,
         format: "fbx",
+        defaultAnimation: "Spider_Walk",
         textures: [
             { slot: "diffuse", url: spiderTexUrl, materialName: "Spider_M" },
             { slot: "diffuse", url: spiderGroundTexUrl, materialName: "Camera_lambert2" },
@@ -86,6 +93,7 @@ const models: ModelEntry[] = [
         name: "Spider (GLB reference)",
         url: spiderGlbUrl,
         format: "glb",
+        defaultAnimation: "Spider_Walk",
         textures: [],
     },
     {
@@ -341,7 +349,7 @@ async function loadModel(index: number) {
         // Update animation UI
         updateAnimationUI(currentResult.animationGroups.length > 0
             ? currentResult.animationGroups
-            : []);
+            : [], model.defaultAnimation);
     } catch (err: any) {
         status.textContent = `Error: ${err.message}`;
         console.error(err);
@@ -430,7 +438,7 @@ let activeAnimations: AnimationGroup[] = [];
 let currentAnimIndex = 0;
 let isPlaying = false;
 
-function updateAnimationUI(groups: AnimationGroup[]) {
+function updateAnimationUI(groups: AnimationGroup[], defaultAnimName?: string) {
     const animSelect = document.getElementById("animSelect") as HTMLSelectElement;
     const animBtn = document.getElementById("animBtn") as HTMLButtonElement;
     const animSeparator = document.getElementById("animSeparator") as HTMLSpanElement;
@@ -459,8 +467,16 @@ function updateAnimationUI(groups: AnimationGroup[]) {
     animBtn.style.display = "";
     animSeparator.style.display = "";
 
-    // Auto-play first animation
-    playAnimation(0);
+    // Find default animation by name, fall back to first
+    let defaultIndex = 0;
+    if (defaultAnimName) {
+        const idx = groups.findIndex(g => g.name === defaultAnimName);
+        if (idx >= 0) defaultIndex = idx;
+    }
+    animSelect.value = String(defaultIndex);
+
+    // Auto-play default animation
+    playAnimation(defaultIndex);
 }
 
 function playAnimation(index: number) {

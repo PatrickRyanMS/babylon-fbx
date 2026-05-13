@@ -8,8 +8,10 @@ import type { Scene } from "@babylonjs/core/scene.js";
 import type { AssetContainer } from "@babylonjs/core/assetContainer.js";
 import type { Nullable } from "@babylonjs/core/types.js";
 import { Mesh } from "@babylonjs/core/Meshes/mesh.js";
+import { SubMesh } from "@babylonjs/core/Meshes/subMesh.js";
 import { VertexData } from "@babylonjs/core/Meshes/mesh.vertexData.js";
 import { StandardMaterial } from "@babylonjs/core/Materials/standardMaterial.js";
+import { MultiMaterial } from "@babylonjs/core/Materials/multiMaterial.js";
 import { Texture } from "@babylonjs/core/Materials/Textures/texture.js";
 import { Color3 } from "@babylonjs/core/Maths/math.color.js";
 import { Vector3, Quaternion, Matrix } from "@babylonjs/core/Maths/math.vector.js";
@@ -228,8 +230,11 @@ export class FBXFileLoader implements ISceneLoaderPluginAsync {
                 FBXFileLoader._applyFBXTransform(mesh, model);
             }
 
-            // Apply material
-            if (model.materials.length > 0) {
+            // Apply material(s)
+            if (model.materials.length > 1 && model.geometry?.materialIndices) {
+                // Multi-material: create sub-meshes for each material
+                this._applyMultiMaterial(mesh, model, materialCache, scene);
+            } else if (model.materials.length > 0) {
                 const mat = materialCache.get(model.materials[0].id);
                 if (mat) {
                     if (model.cullingOff) {
@@ -386,6 +391,81 @@ export class FBXFileLoader implements ISceneLoaderPluginAsync {
         }
 
         return mesh;
+    }
+
+    /**
+     * Apply multi-material to a mesh by creating sub-meshes grouped by material index.
+     * Reorders the index buffer so that triangles sharing the same material are contiguous.
+     */
+    private _applyMultiMaterial(
+        mesh: Mesh,
+        model: FBXModelData,
+        materialCache: Map<bigint, StandardMaterial>,
+        scene: Scene
+    ): void {
+        const matIndices = model.geometry!.materialIndices!;
+        const indices = mesh.getIndices();
+        if (!indices) return;
+
+        const triCount = indices.length / 3;
+
+        // Group triangles by material index
+        const groups = new Map<number, number[]>(); // matIdx -> triangle indices
+        for (let ti = 0; ti < triCount; ti++) {
+            const matIdx = ti < matIndices.length ? matIndices[ti] : 0;
+            let group = groups.get(matIdx);
+            if (!group) {
+                group = [];
+                groups.set(matIdx, group);
+            }
+            group.push(ti);
+        }
+
+        // Sort group keys to ensure consistent ordering
+        const sortedMatIndices = [...groups.keys()].sort((a, b) => a - b);
+
+        // Reorder index buffer so triangles are grouped by material
+        const newIndices: number[] = [];
+        const subMeshRanges: { start: number; count: number; matIdx: number }[] = [];
+
+        for (const matIdx of sortedMatIndices) {
+            const tris = groups.get(matIdx)!;
+            const start = newIndices.length;
+            for (const ti of tris) {
+                newIndices.push(indices[ti * 3], indices[ti * 3 + 1], indices[ti * 3 + 2]);
+            }
+            subMeshRanges.push({ start, count: tris.length * 3, matIdx });
+        }
+
+        // Update the mesh's index buffer
+        mesh.setIndices(newIndices);
+
+        // Create MultiMaterial
+        const multiMat = new MultiMaterial(model.name + "_multi", scene);
+        for (const range of subMeshRanges) {
+            const fbxMat = model.materials[range.matIdx];
+            if (fbxMat) {
+                const mat = materialCache.get(fbxMat.id);
+                if (mat) {
+                    if (model.cullingOff) mat.backFaceCulling = false;
+                    multiMat.subMaterials.push(mat);
+                } else {
+                    multiMat.subMaterials.push(null);
+                }
+            } else {
+                multiMat.subMaterials.push(null);
+            }
+        }
+
+        mesh.material = multiMat;
+
+        // Clear existing sub-meshes and create new ones
+        mesh.subMeshes = [];
+        const vertexCount = mesh.getTotalVertices();
+        for (let i = 0; i < subMeshRanges.length; i++) {
+            const range = subMeshRanges[i];
+            new SubMesh(i, 0, vertexCount, range.start, range.count, mesh);
+        }
     }
 
     /**
