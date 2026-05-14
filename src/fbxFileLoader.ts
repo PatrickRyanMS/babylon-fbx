@@ -168,7 +168,7 @@ export class FBXFileLoader implements ISceneLoaderPluginAsync {
             materialCache.set(matData.id, material);
         }
 
-        // Create skeletons and collect preRotation data for animations
+        // Create skeletons
         const skeletons: Skeleton[] = [];
         const skeletonByGeometryId = new Map<bigint, Skeleton>();
         const skinByGeometryId = new Map<bigint, FBXSkinData>();
@@ -176,7 +176,7 @@ export class FBXFileLoader implements ISceneLoaderPluginAsync {
         const boneRotationOrders = new Map<bigint, number>();
 
         for (const skin of fbxScene.skins) {
-            const { skeleton } = this._createSkeleton(skin, scene);
+            const skeleton = this._createSkeleton(skin, scene);
             skeletons.push(skeleton);
             skeletonByGeometryId.set(skin.geometryId, skeleton);
             skinByGeometryId.set(skin.geometryId, skin);
@@ -227,12 +227,15 @@ export class FBXFileLoader implements ISceneLoaderPluginAsync {
             );
         }
 
-        // Attach non-skinned child meshes/nodes to their parent bones so they
-        // follow skeletal animation.
+        // Link non-skinned child meshes/nodes to their parent bones so they
+        // follow skeletal animation. Preserve their current world matrix when
+        // switching from the FBX model hierarchy to Babylon's bone parent.
         for (let si = 0; si < fbxScene.skins.length; si++) {
             const skin = fbxScene.skins[si];
             const skeleton = skeletons[si];
             const boneModelIds = new Set(skin.bones.map(b => b.modelId));
+            const skinnedMesh = meshes.find(m => m.skeleton === skeleton) ?? null;
+            const boneReferenceNode = skinnedMesh ?? rootNode;
 
             for (const boneData of skin.bones) {
                 const boneNode = modelIdToNode.get(boneData.modelId);
@@ -251,8 +254,20 @@ export class FBXFileLoader implements ISceneLoaderPluginAsync {
                         }
                     }
                     if (!childIsBone) {
+                        const childWorld = childTransform.computeWorldMatrix(true).clone();
+                        const boneReferenceWorld = FBXFileLoader._getBoneReferenceWorldMatrix(
+                            skeleton,
+                            bone,
+                            boneReferenceNode,
+                            skinnedMesh
+                        );
+                        const boneReferenceWorldInv = new Matrix();
+                        boneReferenceWorld.invertToRef(boneReferenceWorldInv);
+                        const childLocalToBone = childWorld.multiply(boneReferenceWorldInv);
+
                         childTransform.parent = null;
-                        childTransform.attachToBone(bone, rootNode);
+                        childTransform.attachToBone(bone, boneReferenceNode);
+                        FBXFileLoader._applyMatrixToTransform(childTransform, childLocalToBone);
                     }
                 }
             }
@@ -260,7 +275,7 @@ export class FBXFileLoader implements ISceneLoaderPluginAsync {
 
         // Apply blend shapes (morph targets) to meshes
         if (fbxScene.blendShapes.length > 0) {
-            this._applyBlendShapes(fbxScene.blendShapes, meshes, scene);
+            this._applyBlendShapes(fbxScene.blendShapes, meshes, scene, fbxScene.unitScaleFactor);
         }
 
         // Create animation groups
@@ -317,17 +332,26 @@ export class FBXFileLoader implements ISceneLoaderPluginAsync {
             const skeleton = skeletonByGeometryId.get(model.geometry.id);
             const skin = skinByGeometryId.get(model.geometry.id);
 
-            const mesh = this._createMesh(model, model.geometry, scene, skeleton, skin);
-            if (parent) {
-                mesh.parent = parent;
+            if (skeleton && skin) {
+                skeleton.needInitialSkinMatrix = true;
             }
 
-            // Apply full FBX transform chain.
-            // If PreRotation was baked into vertices (skinned mesh with non-Identity
-            // cluster Transform), apply the transform WITHOUT PreRotation.
-            if ((model as any)._preRotationBaked) {
-                FBXFileLoader._applyFBXTransformSkipPreRotation(mesh, model);
+            const mesh = this._createMesh(model, model.geometry, scene, skeleton, skin);
+
+            // For skinned meshes: apply the FBX mesh transform as the mesh's
+            // initial pose, not as baked vertex data and not as part of the bone
+            // inverse bind. Babylon's skeleton pose path keeps the mesh transform
+            // and skinning bind matrices independent.
+            if (skeleton && skin) {
+                FBXFileLoader._applyFBXTransform(mesh, model);
+                mesh.computeWorldMatrix(true);
+                mesh.updatePoseMatrix(Matrix.Invert(mesh.getWorldMatrix()));
+                mesh.alwaysSelectAsActiveMesh = true;
+                // Parent under scene root (parent is already set to null by default)
             } else {
+                if (parent) {
+                    mesh.parent = parent;
+                }
                 FBXFileLoader._applyFBXTransform(mesh, model);
             }
 
@@ -342,6 +366,21 @@ export class FBXFileLoader implements ISceneLoaderPluginAsync {
                         mat.backFaceCulling = false;
                     }
                     mesh.material = mat;
+                }
+            }
+
+            // When vertex colors are present, ensure diffuseColor is white so
+            // vertex colors are not darkened by the FBX material's diffuse.
+            if (model.geometry?.colors) {
+                const assignedMat = mesh.material;
+                if (assignedMat && assignedMat instanceof StandardMaterial && !assignedMat.diffuseTexture) {
+                    assignedMat.diffuseColor = new Color3(1, 1, 1);
+                } else if (assignedMat && "subMaterials" in assignedMat) {
+                    for (const sub of (assignedMat as MultiMaterial).subMaterials) {
+                        if (sub && sub instanceof StandardMaterial && !sub.diffuseTexture) {
+                            sub.diffuseColor = new Color3(1, 1, 1);
+                        }
+                    }
                 }
             }
 
@@ -431,49 +470,24 @@ export class FBXFileLoader implements ISceneLoaderPluginAsync {
             }
         }
 
-        // For skinned meshes with non-Identity cluster Transform: bake the mesh's
-        // PreRotation into vertex positions/normals. This puts vertices into the same
-        // coordinate space as the bones (TransformLink = Y-up world space), so that
-        // bone operations work directly on the correct coordinate frame.
-        // Without this, bone ops (Y-up) would be applied to Z-up vertices, causing
-        // the mesh to appear rotated/distorted during animation.
-        let preRotationBaked = false;
-        let preRotMatrix: Matrix | null = null;
-        if (skeleton && skin && skin.bones.length > 0 && skin.bones[0].bindPoseMatrix) {
-            const firstTransform = Matrix.FromArray(skin.bones[0].bindPoseMatrix);
-            if (!FBXFileLoader._isNearIdentity(firstTransform)) {
-                const preRot = model.preRotation;
-                if (preRot[0] !== 0 || preRot[1] !== 0 || preRot[2] !== 0) {
-                    const d2r = Math.PI / 180;
-                    preRotMatrix = FBXFileLoader._eulerToMatrixXYZ(
-                        preRot[0] * d2r, preRot[1] * d2r, preRot[2] * d2r
-                    );
-                    for (let i = 0; i < positions.length; i += 3) {
-                        const v = Vector3.TransformCoordinates(
-                            new Vector3(positions[i], positions[i + 1], positions[i + 2]),
-                            preRotMatrix
-                        );
-                        positions[i] = v.x;
-                        positions[i + 1] = v.y;
-                        positions[i + 2] = v.z;
-                    }
-                    preRotationBaked = true;
-                    (model as any)._preRotationBaked = true;
-                }
-            }
-        }
+        // For skinned meshes: do NOT bake mesh local transform into vertices.
+        // Vertices remain in their original mesh-local space, keeping the mesh data
+        // clean for retargeting. The mesh node carries its FBX transform as an
+        // initial pose, while TransformLink bind matrices handle skinning.
 
         vertexData.positions = positions;
         vertexData.indices = Array.from(geomData.indices);
 
         if (geomData.normals) {
             const normals = float64To32(geomData.normals);
-            // Apply the same PreRotation baking to normals (rotation only, not translation)
-            if (preRotationBaked && preRotMatrix) {
+            // Apply geometric rotation to normals if present
+            if (gr[0] !== 0 || gr[1] !== 0 || gr[2] !== 0) {
+                const d2r = Math.PI / 180;
+                const geoRotMatrix = FBXFileLoader._eulerToMatrixXYZ(gr[0] * d2r, gr[1] * d2r, gr[2] * d2r);
                 for (let i = 0; i < normals.length; i += 3) {
                     const n = Vector3.TransformNormal(
                         new Vector3(normals[i], normals[i + 1], normals[i + 2]),
-                        preRotMatrix
+                        geoRotMatrix
                     );
                     normals[i] = n.x;
                     normals[i + 1] = n.y;
@@ -503,7 +517,17 @@ export class FBXFileLoader implements ISceneLoaderPluginAsync {
         }
 
         if (geomData.colors) {
-            vertexData.colors = geomData.colors;
+            // Force alpha to 1.0 — FBX vertex color alpha is often unreliable
+            // (e.g. zeroed out by exporters) and would cause transparency sorting issues.
+            const colors = new Float32Array(geomData.colors.length);
+            for (let i = 0; i < colors.length; i += 4) {
+                colors[i] = geomData.colors[i];
+                colors[i + 1] = geomData.colors[i + 1];
+                colors[i + 2] = geomData.colors[i + 2];
+                colors[i + 3] = 1.0;
+            }
+            vertexData.colors = colors;
+            mesh.hasVertexAlpha = false;
         }
 
         // Apply bone weights if we have a skin
@@ -523,6 +547,10 @@ export class FBXFileLoader implements ISceneLoaderPluginAsync {
             ...(mesh.metadata as object ?? {}),
             fbxGeometryId: geomData.id,
             fbxControlPointIndices: geomData.controlPointIndices,
+            // Store geometric rotation for morph delta alignment (vertex-level only)
+            fbxPreRotMatrix: (gr[0] !== 0 || gr[1] !== 0 || gr[2] !== 0)
+                ? FBXFileLoader._eulerToMatrixXYZ(gr[0] * Math.PI / 180, gr[1] * Math.PI / 180, gr[2] * Math.PI / 180)
+                : null,
         };
 
         if (skeleton) {
@@ -710,7 +738,8 @@ export class FBXFileLoader implements ISceneLoaderPluginAsync {
             if (tex.embeddedData) {
                 // Create texture from embedded binary data via blob URL
                 const mimeType = FBXFileLoader._guessMimeType(tex.fileName || tex.relativeFileName);
-                const blob = new Blob([tex.embeddedData], { type: mimeType });
+                const embeddedData = new Uint8Array(tex.embeddedData);
+                const blob = new Blob([embeddedData], { type: mimeType });
                 const blobUrl = URL.createObjectURL(blob);
                 texture = new Texture(blobUrl, scene);
             } else {
@@ -807,7 +836,8 @@ export class FBXFileLoader implements ISceneLoaderPluginAsync {
     private _applyBlendShapes(
         blendShapes: FBXBlendShapeData[],
         meshes: Mesh[],
-        scene: Scene
+        scene: Scene,
+        unitScaleFactor: number
     ): void {
         // Build a map from geometry ID to mesh (using the mesh metadata we'll need to store)
         // The mesh's geometry ID is tracked through the model hierarchy during _buildModel.
@@ -823,26 +853,39 @@ export class FBXFileLoader implements ISceneLoaderPluginAsync {
             if (!mesh) continue;
 
             const morphTargetManager = new MorphTargetManager(scene);
+            // Get preRotation matrix if the mesh had its positions baked
+            const preRotMatrix = (mesh.metadata as { fbxPreRotMatrix?: Matrix | null } | undefined)?.fbxPreRotMatrix ?? null;
 
             for (const channel of bs.channels) {
                 // Use the first shape (in-between shapes not yet supported)
                 const shape = channel.shapes[0];
                 if (!shape) continue;
 
-                const basePositions = mesh.getVerticesData("position");
-                if (!basePositions) continue;
-
                 // Get the control point indices for this mesh (stored as metadata)
                 const cpIndices = (mesh.metadata as { fbxControlPointIndices?: Uint32Array } | undefined)?.fbxControlPointIndices;
                 if (!cpIndices) continue;
 
+                const basePositions = mesh.getVerticesData("position");
+                const baseNormals = mesh.getVerticesData("normal");
+                if (!basePositions) continue;
+
                 const vertexCount = basePositions.length / 3;
 
-                // Build delta positions: for each mesh vertex, check if its control point
-                // is in the shape's sparse index list
-                const deltaPositions = new Float32Array(vertexCount * 3);
-                let hasNormals = shape.normals !== null;
-                const deltaNormals = hasNormals ? new Float32Array(vertexCount * 3) : null;
+                // Babylon MorphTarget.setPositions expects ABSOLUTE target positions.
+                // FBX shape vertices are deltas, so we add them to the base.
+                const targetPositions = new Float32Array(vertexCount * 3);
+                const hasNormals = shape.normals !== null && baseNormals !== null;
+                const targetNormals = hasNormals ? new Float32Array(vertexCount * 3) : null;
+
+                // Copy base positions (unaffected vertices stay at base)
+                for (let i = 0; i < targetPositions.length; i++) {
+                    targetPositions[i] = basePositions[i];
+                }
+                if (targetNormals && baseNormals) {
+                    for (let i = 0; i < targetNormals.length; i++) {
+                        targetNormals[i] = baseNormals[i];
+                    }
+                }
 
                 // Build a lookup from control point index to shape data index
                 const cpToShapeIdx = new Map<number, number>();
@@ -855,25 +898,47 @@ export class FBXFileLoader implements ISceneLoaderPluginAsync {
                     const shapeIdx = cpToShapeIdx.get(cpIdx);
                     if (shapeIdx === undefined) continue;
 
-                    // Shape vertices are absolute positions — compute delta
-                    deltaPositions[vi * 3] = shape.vertices[shapeIdx * 3] - basePositions[vi * 3];
-                    deltaPositions[vi * 3 + 1] = shape.vertices[shapeIdx * 3 + 1] - basePositions[vi * 3 + 1];
-                    deltaPositions[vi * 3 + 2] = shape.vertices[shapeIdx * 3 + 2] - basePositions[vi * 3 + 2];
+                    // Get the raw FBX delta
+                    let dx = shape.vertices[shapeIdx * 3];
+                    let dy = shape.vertices[shapeIdx * 3 + 1];
+                    let dz = shape.vertices[shapeIdx * 3 + 2];
 
-                    if (deltaNormals && shape.normals) {
-                        const baseNormals = mesh.getVerticesData("normal");
-                        if (baseNormals) {
-                            deltaNormals[vi * 3] = shape.normals[shapeIdx * 3] - baseNormals[vi * 3];
-                            deltaNormals[vi * 3 + 1] = shape.normals[shapeIdx * 3 + 1] - baseNormals[vi * 3 + 1];
-                            deltaNormals[vi * 3 + 2] = shape.normals[shapeIdx * 3 + 2] - baseNormals[vi * 3 + 2];
+                    // Rotate delta by the same preRotation applied to base positions
+                    if (preRotMatrix) {
+                        const rv = Vector3.TransformNormal(new Vector3(dx, dy, dz), preRotMatrix);
+                        dx = rv.x; dy = rv.y; dz = rv.z;
+                    }
+
+                    // Scale delta by UnitScaleFactor — base mesh positions are in scaled space
+                    // but shape deltas are stored in the original unscaled space
+                    if (unitScaleFactor !== 1) {
+                        dx *= unitScaleFactor;
+                        dy *= unitScaleFactor;
+                        dz *= unitScaleFactor;
+                    }
+
+                    targetPositions[vi * 3] += dx;
+                    targetPositions[vi * 3 + 1] += dy;
+                    targetPositions[vi * 3 + 2] += dz;
+
+                    if (targetNormals && shape.normals) {
+                        let nx = shape.normals[shapeIdx * 3];
+                        let ny = shape.normals[shapeIdx * 3 + 1];
+                        let nz = shape.normals[shapeIdx * 3 + 2];
+                        if (preRotMatrix) {
+                            const rn = Vector3.TransformNormal(new Vector3(nx, ny, nz), preRotMatrix);
+                            nx = rn.x; ny = rn.y; nz = rn.z;
                         }
+                        targetNormals[vi * 3] += nx;
+                        targetNormals[vi * 3 + 1] += ny;
+                        targetNormals[vi * 3 + 2] += nz;
                     }
                 }
 
                 const morphTarget = new MorphTarget(channel.name, channel.deformPercent / 100, scene);
-                morphTarget.setPositions(deltaPositions);
-                if (deltaNormals) {
-                    morphTarget.setNormals(deltaNormals);
+                morphTarget.setPositions(targetPositions);
+                if (targetNormals) {
+                    morphTarget.setNormals(targetNormals);
                 }
                 // Store channel ID mapping on the mesh for animation targeting
                 if (!mesh.metadata) mesh.metadata = {};
@@ -949,36 +1014,17 @@ export class FBXFileLoader implements ISceneLoaderPluginAsync {
         return light;
     }
 
-    private _createSkeleton(skin: FBXSkinData, scene: Scene): { skeleton: Skeleton } {
+    private _createSkeleton(skin: FBXSkinData, scene: Scene): Skeleton {
         const skeleton = new Skeleton("Skeleton", "skeleton_" + skin.id.toString(), scene);
         const babylonBones: Bone[] = [];
 
-        // Compute per-bone world matrices from cluster data.
-        const tlWorldMatrices: (Matrix | null)[] = [];
-        for (let i = 0; i < skin.bones.length; i++) {
-            const boneData = skin.bones[i];
-            tlWorldMatrices.push(
-                boneData.transformLinkMatrix ? Matrix.FromArray(boneData.transformLinkMatrix) : null
-            );
-        }
-
-        // localMatrix = Lcl-derived (what animation naturally targets)
-        // bindMatrix = TL-local (bone's bind-time local transform from TransformLink)
-        // This works because at bind time:
-        //   absoluteBindMatrix = accumulated(TL-local) = TL_world
-        //   absoluteInverseBindMatrix = inv(TL_world)
-        //   boneInfluence = inv(TL) * absoluteMatrix_current
-        //
-        // For meshes where Transform ≠ Identity (Phoenix), the mesh's PreRotation is
-        // baked into vertex data in _createMesh(), keeping mesh node at Identity,
-        // so bones (in Y-up TL space) operate directly on Y-up vertex data.
-
+        // Phase 1: Create bones with localMatrix = computedLcl (the bone's rest pose
+        // from Lcl properties). This is what animation curves naturally target.
         for (let i = 0; i < skin.bones.length; i++) {
             const boneData = skin.bones[i];
             const parentBone = boneData.parentIndex >= 0 ? babylonBones[boneData.parentIndex] : null;
 
-            // Local matrix from Lcl properties — this is what animation naturally targets.
-            const localMatrix = FBXFileLoader._computeFBXLocalMatrix(
+            const computedLcl = FBXFileLoader._computeFBXLocalMatrix(
                 boneData.translation,
                 boneData.rotation,
                 boneData.scale,
@@ -991,41 +1037,46 @@ export class FBXFileLoader implements ISceneLoaderPluginAsync {
                 boneData.rotationOrder
             );
 
-            // Bind matrix from TransformLink hierarchy.
-            let bindMatrix: Matrix | null = null;
-            const tl = tlWorldMatrices[i];
-            if (tl) {
-                if (boneData.parentIndex >= 0 && tlWorldMatrices[boneData.parentIndex]) {
-                    const parentTLInv = new Matrix();
-                    tlWorldMatrices[boneData.parentIndex]!.invertToRef(parentTLInv);
-                    bindMatrix = tl.multiply(parentTLInv);
-                } else {
-                    bindMatrix = tl.clone();
-                }
-            }
-
             const bone = new Bone(
                 boneData.name,
                 skeleton,
                 parentBone,
-                localMatrix,
-                null,       // restMatrix
-                bindMatrix  // bindMatrix from TL
+                computedLcl,   // localMatrix = rest pose (what animation drives)
+                null,          // restMatrix
+                null,          // bindMatrix (set in phase 2)
+                i              // index
             );
             babylonBones.push(bone);
         }
 
-        return { skeleton };
-    }
+        // Phase 2: Set bind matrices independently (GLTF loader pattern).
+        // FBX Cluster TransformLink is the bone's absolute bind matrix. Cluster
+        // Transform is exporter-dependent and can vary per cluster, so folding
+        // it into the inverse bind corrupts normal rest-pose skinning.
+        for (let i = 0; i < skin.bones.length; i++) {
+            const boneData = skin.bones[i];
+            const bone = babylonBones[i];
 
-    private static _isNearIdentity(m: Matrix): boolean {
-        const v = m.toArray();
-        return Math.abs(v[0] - 1) < 0.001 && Math.abs(v[5] - 1) < 0.001 &&
-               Math.abs(v[10] - 1) < 0.001 && Math.abs(v[15] - 1) < 0.001 &&
-               Math.abs(v[12]) < 0.001 && Math.abs(v[13]) < 0.001 && Math.abs(v[14]) < 0.001 &&
-               Math.abs(v[1]) < 0.001 && Math.abs(v[2]) < 0.001 && Math.abs(v[3]) < 0.001 &&
-               Math.abs(v[4]) < 0.001 && Math.abs(v[6]) < 0.001 && Math.abs(v[7]) < 0.001 &&
-               Math.abs(v[8]) < 0.001 && Math.abs(v[9]) < 0.001 && Math.abs(v[11]) < 0.001;
+            if (!boneData.transformLinkMatrix) continue;
+
+            const absoluteBind = Matrix.FromArray(boneData.transformLinkMatrix);
+
+            // Derive localBind = absoluteBind × inv(parentAbsoluteBind)
+            const parentBone = bone.getParent();
+            let localBind: Matrix;
+            if (parentBone) {
+                const parentAbsoluteBindInv = parentBone.getAbsoluteInverseBindMatrix();
+                localBind = absoluteBind.multiply(parentAbsoluteBindInv);
+            } else {
+                localBind = absoluteBind;
+            }
+
+            // Set bind matrix without changing local (false, false) — same as GLTF loader
+            bone.updateMatrix(localBind, false, false);
+            bone._updateAbsoluteBindMatrices(undefined, false);
+        }
+
+        return skeleton;
     }
 
     /**
@@ -1187,31 +1238,26 @@ export class FBXFileLoader implements ISceneLoaderPluginAsync {
         node.scaling = s;
     }
 
-    /**
-     * Apply the FBX transform chain WITHOUT PreRotation.
-     * Used when PreRotation was already baked into vertex data.
-     */
-    private static _applyFBXTransformSkipPreRotation(
-        node: TransformNode | Mesh,
-        model: FBXModelData
-    ): void {
-        const localMatrix = FBXFileLoader._computeFBXLocalMatrix(
-            model.translation,
-            model.rotation,
-            model.scale,
-            [0, 0, 0],  // PreRotation zeroed — already baked into vertices
-            model.postRotation,
-            model.rotationPivot,
-            model.scalingPivot,
-            model.rotationOffset,
-            model.scalingOffset,
-            model.rotationOrder
-        );
+    private static _getBoneReferenceWorldMatrix(
+        skeleton: Skeleton,
+        bone: Bone,
+        referenceNode: TransformNode,
+        skinnedMesh: Mesh | null
+    ): Matrix {
+        if (skinnedMesh) {
+            skeleton.getTransformMatrices(skinnedMesh);
+        } else {
+            skeleton.prepare(true);
+        }
+        referenceNode.computeWorldMatrix(true);
+        return bone.getFinalMatrix().multiply(referenceNode.getWorldMatrix());
+    }
 
+    private static _applyMatrixToTransform(node: TransformNode, matrix: Matrix): void {
         const s = new Vector3();
         const r = new Quaternion();
         const t = new Vector3();
-        localMatrix.decompose(s, r, t);
+        matrix.decompose(s, r, t);
 
         node.position = t;
         node.rotationQuaternion = r;
@@ -1246,8 +1292,8 @@ export class FBXFileLoader implements ISceneLoaderPluginAsync {
             }
         }
 
-        // Group curve nodes by target: bones get simple animations,
-        // non-bone nodes need matrix-baked animations when pivots are present
+        // Group curve nodes by target
+        const boneCurves = new Map<bigint, FBXCurveNodeData[]>();
         const nonBoneCurves = new Map<bigint, FBXCurveNodeData[]>();
         const blendShapeCurves: FBXCurveNodeData[] = [];
 
@@ -1259,18 +1305,31 @@ export class FBXFileLoader implements ISceneLoaderPluginAsync {
 
             const bone = modelIdToBone.get(curveNode.targetModelId);
             if (bone) {
-                const preRot = bonePreRotations.get(curveNode.targetModelId) ?? [0, 0, 0];
-                const rotOrder = boneRotationOrders.get(curveNode.targetModelId) ?? 0;
-                const animation = this._buildBoneAnimation(curveNode, bone.name, preRot, rotOrder);
-                if (animation) {
-                    animGroup.addTargetedAnimation(animation, bone);
+                if (!boneCurves.has(curveNode.targetModelId)) {
+                    boneCurves.set(curveNode.targetModelId, []);
                 }
+                boneCurves.get(curveNode.targetModelId)!.push(curveNode);
             } else {
-                // Collect all curve nodes for this target to handle pivots correctly
                 if (!nonBoneCurves.has(curveNode.targetModelId)) {
                     nonBoneCurves.set(curveNode.targetModelId, []);
                 }
                 nonBoneCurves.get(curveNode.targetModelId)!.push(curveNode);
+            }
+        }
+
+        // Process bone targets: compute full FBX local matrix per frame, decompose to TRS.
+        // No per-key correction is applied; animation curves drive the FBX local
+        // transform chain, while bind matrices remain independent.
+        for (const [targetId, curveNodes] of boneCurves) {
+            const bone = modelIdToBone.get(targetId)!;
+            const modelData = modelIdToData.get(targetId);
+            if (!modelData) continue;
+
+            const animations = this._buildBoneAnimations(
+                curveNodes, bone.name, modelData
+            );
+            for (const animation of animations) {
+                animGroup.addTargetedAnimation(animation, bone);
             }
         }
 
@@ -1467,6 +1526,129 @@ export class FBXFileLoader implements ISceneLoaderPluginAsync {
             }
         }
         return true;
+    }
+
+    /**
+     * Build matrix-baked bone animation with TL/Lcl correction.
+     * Computes the full FBX local matrix at each keyframe, applies
+     * the correction (TL_local × inv(computedLcl)) to map from
+     * Lcl animation space into TL bind space, then decomposes to TRS.
+     */
+    private _buildBoneAnimations(
+        curveNodes: FBXCurveNodeData[],
+        boneName: string,
+        modelData: FBXModelData
+    ): Animation[] {
+        const fps = 30;
+
+        // Separate curves by type
+        const tNode = curveNodes.find(cn => cn.type === "T");
+        const rNode = curveNodes.find(cn => cn.type === "R");
+        const sNode = curveNodes.find(cn => cn.type === "S");
+
+        // Collect all unique time points
+        const timeSet = new Set<number>();
+        for (const cn of curveNodes) {
+            for (const curve of cn.curves) {
+                for (const key of curve.keys) {
+                    timeSet.add(key.time);
+                }
+            }
+        }
+        const times = [...timeSet].sort((a, b) => a - b);
+        if (times.length === 0) return [];
+
+        // Get curve accessors
+        const txCurve = tNode?.curves.find(c => c.channel === "d|X");
+        const tyCurve = tNode?.curves.find(c => c.channel === "d|Y");
+        const tzCurve = tNode?.curves.find(c => c.channel === "d|Z");
+        const rxCurve = rNode?.curves.find(c => c.channel === "d|X");
+        const ryCurve = rNode?.curves.find(c => c.channel === "d|Y");
+        const rzCurve = rNode?.curves.find(c => c.channel === "d|Z");
+        const sxCurve = sNode?.curves.find(c => c.channel === "d|X");
+        const syCurve = sNode?.curves.find(c => c.channel === "d|Y");
+        const szCurve = sNode?.curves.find(c => c.channel === "d|Z");
+
+        const posKeys: { frame: number; value: Vector3 }[] = [];
+        const rotKeys: { frame: number; value: Quaternion }[] = [];
+        const sclKeys: { frame: number; value: Vector3 }[] = [];
+        let prevQuat: Quaternion | null = null;
+
+        for (const time of times) {
+            const frame = time * fps;
+
+            // Sample animated values, falling back to model's base values
+            const tx = sampleCurveAtTime(txCurve, time) ?? modelData.translation[0];
+            const ty = sampleCurveAtTime(tyCurve, time) ?? modelData.translation[1];
+            const tz = sampleCurveAtTime(tzCurve, time) ?? modelData.translation[2];
+            const rx = sampleCurveAtTime(rxCurve, time) ?? modelData.rotation[0];
+            const ry = sampleCurveAtTime(ryCurve, time) ?? modelData.rotation[1];
+            const rz = sampleCurveAtTime(rzCurve, time) ?? modelData.rotation[2];
+            const sx = sampleCurveAtTime(sxCurve, time) ?? modelData.scale[0];
+            const sy = sampleCurveAtTime(syCurve, time) ?? modelData.scale[1];
+            const sz = sampleCurveAtTime(szCurve, time) ?? modelData.scale[2];
+
+            // Compute the full FBX local matrix from animated Lcl values
+            const localMatrix = FBXFileLoader._computeFBXLocalMatrix(
+                [tx, ty, tz],
+                [rx, ry, rz],
+                [sx, sy, sz],
+                modelData.preRotation,
+                modelData.postRotation,
+                modelData.rotationPivot,
+                modelData.scalingPivot,
+                modelData.rotationOffset,
+                modelData.scalingOffset,
+                modelData.rotationOrder
+            );
+
+            // Decompose into TRS
+            const s = new Vector3();
+            const r = new Quaternion();
+            const t = new Vector3();
+            localMatrix.decompose(s, r, t);
+
+            // Ensure quaternion continuity
+            if (prevQuat && Quaternion.Dot(prevQuat, r) < 0) {
+                r.scaleInPlace(-1);
+            }
+            prevQuat = r;
+
+            posKeys.push({ frame, value: t });
+            rotKeys.push({ frame, value: r });
+            sclKeys.push({ frame, value: s });
+        }
+
+        const animations: Animation[] = [];
+
+        if (!this._isVector3KeysConstant(posKeys)) {
+            const posAnim = new Animation(
+                `${boneName}_position`, "position", fps,
+                Animation.ANIMATIONTYPE_VECTOR3, Animation.ANIMATIONLOOPMODE_CYCLE
+            );
+            posAnim.setKeys(posKeys);
+            animations.push(posAnim);
+        }
+
+        if (rNode) {
+            const rotAnim = new Animation(
+                `${boneName}_rotation`, "rotationQuaternion", fps,
+                Animation.ANIMATIONTYPE_QUATERNION, Animation.ANIMATIONLOOPMODE_CYCLE
+            );
+            rotAnim.setKeys(rotKeys);
+            animations.push(rotAnim);
+        }
+
+        if (!this._isVector3KeysConstant(sclKeys)) {
+            const sclAnim = new Animation(
+                `${boneName}_scaling`, "scaling", fps,
+                Animation.ANIMATIONTYPE_VECTOR3, Animation.ANIMATIONLOOPMODE_CYCLE
+            );
+            sclAnim.setKeys(sclKeys);
+            animations.push(sclAnim);
+        }
+
+        return animations;
     }
 
     private _buildBoneAnimation(

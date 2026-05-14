@@ -63,6 +63,28 @@ import droneDiffUrl from "../tests/models/mech-drone/textures/Drone_diff.jpeg?ur
 import droneEmissiveUrl from "../tests/models/mech-drone/textures/Drone_emissive.jpeg?url";
 import droneNormalUrl from "../tests/models/mech-drone/textures/Drone_normal.jpeg?url";
 
+// Jet Car (vertex colors)
+import carFbxUrl from "../tests/models/40min-draft-jet-car-vertex-color/Car.fbx?url";
+
+// Gandalf Sax Animated PC Set
+import gandalfFbxUrl from "../tests/models/gandalf-sax-animated-pc-set/source/Double_Display_Composition_04.fbx?url";
+import gandalfDisplayBaseUrl from "../tests/models/gandalf-sax-animated-pc-set/textures/Double_Display_Base_Color.png?url";
+import gandalfDisplayNormalUrl from "../tests/models/gandalf-sax-animated-pc-set/textures/Double_Display_Normal_DirectX.png?url";
+import gandalfDisplayMetallicUrl from "../tests/models/gandalf-sax-animated-pc-set/textures/Double_Display_Metallic.png?url";
+import gandalfDisplayRoughnessUrl from "../tests/models/gandalf-sax-animated-pc-set/textures/Double_Display_Roughness.png?url";
+import gandalfKeyboardBaseUrl from "../tests/models/gandalf-sax-animated-pc-set/textures/Mechan_Keyboard_Base_Color.png?url";
+import gandalfKeyboardNormalUrl from "../tests/models/gandalf-sax-animated-pc-set/textures/Mechan_Keyboard_Normal_DirectX.png?url";
+import gandalfKeyboardOpacityUrl from "../tests/models/gandalf-sax-animated-pc-set/textures/Mechan_Keyboard_Opacity.png?url";
+import gandalfMouseBaseUrl from "../tests/models/gandalf-sax-animated-pc-set/textures/PC_Mouse_BaseColor.png?url";
+import gandalfMouseNormalUrl from "../tests/models/gandalf-sax-animated-pc-set/textures/PC_Mouse_Normal.png?url";
+
+// Mannequin (animated, with normal/roughness/specular textures)
+import mannequinFbxUrl from "../tests/models/mannequin-anatomy-aid-free-download/source/Mannequin_Animation.FBX?url";
+import mannequinDiffuseUrl from "../tests/models/mannequin-anatomy-aid-free-download/textures/Diffuse.jpeg?url";
+import mannequinNormalUrl from "../tests/models/mannequin-anatomy-aid-free-download/textures/Normal.jpeg?url";
+import mannequinRoughnessUrl from "../tests/models/mannequin-anatomy-aid-free-download/textures/Roughness.jpeg?url";
+import mannequinSpecularUrl from "../tests/models/mannequin-anatomy-aid-free-download/textures/Specular.jpeg?url";
+
 // Register the FBX loader
 SceneLoader.RegisterPlugin(new FBXFileLoader());
 
@@ -155,6 +177,35 @@ const models: ModelEntry[] = [
             { slot: "diffuse", url: droneDiffUrl },
             { slot: "emissive", url: droneEmissiveUrl },
             { slot: "normal", url: droneNormalUrl },
+        ],
+    },
+    {
+        name: "Jet Car (vertex colors)",
+        url: carFbxUrl,
+        format: "fbx",
+        textures: [],
+    },
+    {
+        name: "Gandalf Sax PC Set (animated)",
+        url: gandalfFbxUrl,
+        format: "fbx",
+        textures: [
+            { slot: "diffuse", url: gandalfDisplayBaseUrl, materialName: "Double_Display" },
+            { slot: "normal", url: gandalfDisplayNormalUrl, materialName: "Double_Display" },
+            { slot: "diffuse", url: gandalfKeyboardBaseUrl, materialName: "Mechan_Keyboard" },
+            { slot: "normal", url: gandalfKeyboardNormalUrl, materialName: "Mechan_Keyboard" },
+            { slot: "opacity", url: gandalfKeyboardOpacityUrl, materialName: "Mechan_Keyboard" },
+            { slot: "diffuse", url: gandalfMouseBaseUrl, materialName: "PC_Mouse" },
+            { slot: "normal", url: gandalfMouseNormalUrl, materialName: "PC_Mouse" },
+        ],
+    },
+    {
+        name: "Mannequin (animated)",
+        url: mannequinFbxUrl,
+        format: "fbx",
+        textures: [
+            { slot: "diffuse", url: mannequinDiffuseUrl },
+            { slot: "normal", url: mannequinNormalUrl },
         ],
     },
 ];

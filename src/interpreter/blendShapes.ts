@@ -125,7 +125,7 @@ function extractBlendShape(
 }
 
 function extractShape(shapeNode: FBXNode): FBXShapeData | null {
-    // Shape has: Indexes (sparse vertex indices), Vertices (delta or absolute positions), Normals (optional)
+    // Shape has: Indexes (sparse vertex indices), Vertices (delta offsets from base), Normals (optional delta)
     const indexesNode = findChildByName(shapeNode, "Indexes");
     const verticesNode = findChildByName(shapeNode, "Vertices");
 
