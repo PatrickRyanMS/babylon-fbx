@@ -7,11 +7,12 @@ import { findDocumentNode } from "../../src/types/fbxTypes.js";
 
 const SPIDER_PATH = resolve(
     __dirname,
-    "../models/spider-animated-character/source/Spider_sketchfab.fbx"
+    "../models/spider-animated-character/Spider_sketchfab.fbx"
 );
 
 describe("Spider model (FBX v7.4, 32-bit offsets)", () => {
-    const buffer = readFileSync(SPIDER_PATH).buffer;
+    const file = readFileSync(SPIDER_PATH);
+    const buffer = file.buffer.slice(file.byteOffset, file.byteOffset + file.byteLength);
     const doc = parseBinaryFBX(buffer);
 
     it("should parse as version 7400", () => {

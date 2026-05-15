@@ -93,10 +93,11 @@ function findMeshModels(models: any[]): any[] {
 }
 
 // Test embedded textures using Spider model (which has embedded texture data)
-const SPIDER_PATH = resolve(__dirname, "../models/spider-animated-character/source/Spider_sketchfab.fbx");
+const SPIDER_PATH = resolve(__dirname, "../models/spider-animated-character/Spider_sketchfab.fbx");
 
 describe("embedded textures", () => {
-    const buffer = readFileSync(SPIDER_PATH).buffer;
+    const file = readFileSync(SPIDER_PATH);
+    const buffer = file.buffer.slice(file.byteOffset, file.byteOffset + file.byteLength);
     const doc = parseBinaryFBX(buffer);
     const scene = interpretFBX(doc);
 

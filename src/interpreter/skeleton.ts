@@ -102,7 +102,10 @@ function extractSkin(
         }
     }
 
-    // Build bone hierarchy from Model parent-child relationships
+    // Build bone hierarchy from Model parent-child relationships. Include
+    // skeleton-like ancestors even when they are not weighted clusters; some
+    // rigs (for example 3ds Max Biped) animate a non-cluster root above the
+    // clustered bones.
     const bones = buildBoneHierarchy(boneModelMap, objectMap);
     if (bones.length === 0) return null;
 
@@ -130,29 +133,12 @@ function buildBoneHierarchy(
     objectMap: FBXObjectMap
 ): FBXBoneData[] {
     const bones: FBXBoneData[] = [];
-    const boneIndexMap = new Map<bigint, number>();
     const visited = new Set<bigint>();
+    const skeletonModelIds = collectSkeletonModelIds(boneModelMap, objectMap);
+    const parentByModelId = buildSkeletonParentMap(skeletonModelIds, objectMap);
+    const childrenByModelId = buildSkeletonChildrenMap(skeletonModelIds, parentByModelId);
 
-    // Find root bones: bones whose parent model is NOT another bone in our map.
-    // Since FBX connects bones to clusters AND parent bones, we need to check
-    // all parent connections to find the actual model hierarchy.
-    const hasParentBone = new Set<bigint>();
-    for (const modelId of boneModelMap.keys()) {
-        // Check if any other bone in our map is a parent of this bone
-        for (const conn of objectMap.connections) {
-            if (conn.childId === modelId && conn.type === "OO" && boneModelMap.has(conn.parentId)) {
-                hasParentBone.add(modelId);
-                break;
-            }
-        }
-    }
-
-    const rootBoneIds: bigint[] = [];
-    for (const modelId of boneModelMap.keys()) {
-        if (!hasParentBone.has(modelId)) {
-            rootBoneIds.push(modelId);
-        }
-    }
+    const rootBoneIds = [...skeletonModelIds].filter((modelId) => !parentByModelId.has(modelId));
 
     // BFS to build ordered list
     const queue: { modelId: bigint; parentIndex: number }[] = rootBoneIds.map((id) => ({
@@ -169,13 +155,12 @@ function buildBoneHierarchy(
         if (!modelNode) continue;
 
         const boneIndex = bones.length;
-        boneIndexMap.set(modelId, boneIndex);
 
-        const clusterInfo = boneModelMap.get(modelId)!;
+        const clusterInfo = boneModelMap.get(modelId);
         const transform = extractBoneTransform(modelNode);
-        const { bindPoseMatrix, transformLinkMatrix } = extractClusterMatrices(
-            clusterInfo.clusterNode
-        );
+        const { bindPoseMatrix, transformLinkMatrix } = clusterInfo
+            ? extractClusterMatrices(clusterInfo.clusterNode)
+            : { bindPoseMatrix: null, transformLinkMatrix: null };
 
         bones.push({
             modelId,
@@ -196,16 +181,89 @@ function buildBoneHierarchy(
             transformLinkMatrix,
         });
 
-        // Find child bones of this model that are also in our boneModelMap
-        const childModels = getChildren(objectMap, modelId, "Model");
-        for (const { id: childId } of childModels) {
-            if (boneModelMap.has(childId) && !visited.has(childId)) {
+        for (const childId of childrenByModelId.get(modelId) ?? []) {
+            if (!visited.has(childId)) {
                 queue.push({ modelId: childId, parentIndex: boneIndex });
             }
         }
     }
 
     return bones;
+}
+
+function buildSkeletonChildrenMap(
+    skeletonModelIds: Set<bigint>,
+    parentByModelId: Map<bigint, bigint>
+): Map<bigint, bigint[]> {
+    const childrenByModelId = new Map<bigint, bigint[]>();
+
+    for (const modelId of skeletonModelIds) {
+        const parentId = parentByModelId.get(modelId);
+        if (parentId === undefined) continue;
+
+        if (!childrenByModelId.has(parentId)) {
+            childrenByModelId.set(parentId, []);
+        }
+        childrenByModelId.get(parentId)!.push(modelId);
+    }
+
+    return childrenByModelId;
+}
+
+function collectSkeletonModelIds(
+    boneModelMap: Map<bigint, { clusterId: bigint; clusterNode: FBXNode }>,
+    objectMap: FBXObjectMap
+): Set<bigint> {
+    const skeletonModelIds = new Set<bigint>(boneModelMap.keys());
+
+    for (const modelId of boneModelMap.keys()) {
+        let parentId = findModelParentId(modelId, objectMap);
+        while (parentId !== undefined) {
+            const parentNode = objectMap.objects.get(parentId);
+            if (!parentNode || parentNode.name !== "Model" || !isSkeletonModel(parentNode)) {
+                break;
+            }
+
+            skeletonModelIds.add(parentId);
+            parentId = findModelParentId(parentId, objectMap);
+        }
+    }
+
+    return skeletonModelIds;
+}
+
+function buildSkeletonParentMap(
+    skeletonModelIds: Set<bigint>,
+    objectMap: FBXObjectMap
+): Map<bigint, bigint> {
+    const parentByModelId = new Map<bigint, bigint>();
+
+    for (const modelId of skeletonModelIds) {
+        let parentId = findModelParentId(modelId, objectMap);
+        while (parentId !== undefined) {
+            if (skeletonModelIds.has(parentId)) {
+                parentByModelId.set(modelId, parentId);
+                break;
+            }
+            parentId = findModelParentId(parentId, objectMap);
+        }
+    }
+
+    return parentByModelId;
+}
+
+function findModelParentId(modelId: bigint, objectMap: FBXObjectMap): bigint | undefined {
+    const parentConnection = objectMap.connections.find((conn) =>
+        conn.type === "OO" &&
+        conn.childId === modelId &&
+        objectMap.objects.get(conn.parentId)?.name === "Model"
+    );
+    return parentConnection?.parentId;
+}
+
+function isSkeletonModel(modelNode: FBXNode): boolean {
+    const subType = getPropertyValue<string>(modelNode, 2);
+    return subType === "Root" || subType === "LimbNode";
 }
 
 function extractBoneTransform(modelNode: FBXNode): {

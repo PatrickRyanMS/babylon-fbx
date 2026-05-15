@@ -19,6 +19,7 @@ import { Skeleton } from "@babylonjs/core/Bones/skeleton.js";
 import { Bone } from "@babylonjs/core/Bones/bone.js";
 import { Animation } from "@babylonjs/core/Animations/animation.js";
 import { AnimationGroup } from "@babylonjs/core/Animations/animationGroup.js";
+import { AnimationKeyInterpolation, type IAnimationKey } from "@babylonjs/core/Animations/animationKey.js";
 import { MorphTarget } from "@babylonjs/core/Morph/morphTarget.js";
 import { MorphTargetManager } from "@babylonjs/core/Morph/morphTargetManager.js";
 import { FreeCamera } from "@babylonjs/core/Cameras/freeCamera.js";
@@ -35,7 +36,7 @@ import type { FBXGeometryData } from "./interpreter/geometry.js";
 import type { FBXMaterialData } from "./interpreter/materials.js";
 import type { FBXSkinData, FBXBoneData } from "./interpreter/skeleton.js";
 import type { FBXBlendShapeData } from "./interpreter/blendShapes.js";
-import type { FBXAnimationStackData, FBXCurveNodeData } from "./interpreter/animation.js";
+import { sampleFBXCurveAtTime, type FBXAnimationStackData, type FBXCurveData, type FBXCurveNodeData } from "./interpreter/animation.js";
 
 const FBX_ASCII_MAGIC = "; FBX";
 const FBX_BINARY_MAGIC = "Kaydara FBX Binary";
@@ -369,20 +370,10 @@ export class FBXFileLoader implements ISceneLoaderPluginAsync {
                 }
             }
 
-            // When vertex colors are present, ensure diffuseColor is white so
-            // vertex colors are not darkened by the FBX material's diffuse.
             if (model.geometry?.colors) {
-                const assignedMat = mesh.material;
-                if (assignedMat && assignedMat instanceof StandardMaterial && !assignedMat.diffuseTexture) {
-                    assignedMat.diffuseColor = new Color3(1, 1, 1);
-                } else if (assignedMat && "subMaterials" in assignedMat) {
-                    for (const sub of (assignedMat as MultiMaterial).subMaterials) {
-                        if (sub && sub instanceof StandardMaterial && !sub.diffuseTexture) {
-                            sub.diffuseColor = new Color3(1, 1, 1);
-                        }
-                    }
-                }
+                this._useUnmodulatedVertexColorMaterials(mesh, scene);
             }
+            this._applyMaterialUVSetCoordinates(mesh.material, model.geometry);
 
             meshes.push(mesh);
             modelIdToNode.set(model.id, mesh);
@@ -635,6 +626,81 @@ export class FBXFileLoader implements ISceneLoaderPluginAsync {
         }
     }
 
+    private _applyMaterialUVSetCoordinates(
+        material: unknown,
+        geometry: FBXGeometryData
+    ): void {
+        if (!material) return;
+        if (material instanceof MultiMaterial) {
+            for (const subMaterial of material.subMaterials) {
+                if (subMaterial instanceof StandardMaterial) {
+                    this._applyStandardMaterialUVSetCoordinates(subMaterial, geometry);
+                }
+            }
+            return;
+        }
+        if (material instanceof StandardMaterial) {
+            this._applyStandardMaterialUVSetCoordinates(material, geometry);
+        }
+    }
+
+    private _applyStandardMaterialUVSetCoordinates(
+        material: StandardMaterial,
+        geometry: FBXGeometryData
+    ): void {
+        for (const texture of [
+            material.diffuseTexture,
+            material.bumpTexture,
+            material.emissiveTexture,
+            material.ambientTexture,
+            material.specularTexture,
+            material.opacityTexture,
+            material.reflectionTexture,
+        ]) {
+            if (!texture) continue;
+
+            const uvSetName = (texture.metadata as { fbxUVSetName?: string } | null | undefined)?.fbxUVSetName;
+            if (!uvSetName) continue;
+
+            const uvSetIndex = geometry.uvSets.findIndex((uvSet) => uvSet.name === uvSetName);
+            if (uvSetIndex >= 0) {
+                texture.coordinatesIndex = uvSetIndex;
+            }
+        }
+    }
+
+    /**
+     * Babylon multiplies vertex colors by material diffuse color. Use per-mesh
+     * material clones so vertex-colored geometry can render unmodulated without
+     * changing shared materials used by non-vertex-colored meshes.
+     */
+    private _useUnmodulatedVertexColorMaterials(mesh: Mesh, scene: Scene): void {
+        const assignedMat = mesh.material;
+        if (!assignedMat) return;
+
+        if (assignedMat instanceof StandardMaterial) {
+            if (!assignedMat.diffuseTexture) {
+                const clone = assignedMat.clone(`${assignedMat.name}_VertexColor`);
+                clone.diffuseColor = new Color3(1, 1, 1);
+                mesh.material = clone;
+            }
+            return;
+        }
+
+        if (assignedMat instanceof MultiMaterial) {
+            const multiMat = new MultiMaterial(`${assignedMat.name}_VertexColor`, scene);
+            multiMat.subMaterials = assignedMat.subMaterials.map((sub) => {
+                if (sub instanceof StandardMaterial && !sub.diffuseTexture) {
+                    const clone = sub.clone(`${sub.name}_VertexColor`);
+                    clone.diffuseColor = new Color3(1, 1, 1);
+                    return clone;
+                }
+                return sub;
+            });
+            mesh.material = multiMat;
+        }
+    }
+
     /**
      * Build per-polygon-vertex bone indices and weights from the control-point-based skin data.
      * The geometry expands control points to per-polygon-vertex, so we need to look up
@@ -809,6 +875,15 @@ export class FBXFileLoader implements ISceneLoaderPluginAsync {
             if (tex.uvRotation !== undefined) {
                 texture.wAng = tex.uvRotation * (Math.PI / 180);
             }
+            if (tex.uvSetIndex !== undefined) {
+                texture.coordinatesIndex = tex.uvSetIndex;
+            }
+            if (tex.uvSetName) {
+                texture.metadata = {
+                    ...(texture.metadata as object ?? {}),
+                    fbxUVSetName: tex.uvSetName,
+                };
+            }
         }
 
         return material;
@@ -853,6 +928,7 @@ export class FBXFileLoader implements ISceneLoaderPluginAsync {
             if (!mesh) continue;
 
             const morphTargetManager = new MorphTargetManager(scene);
+            morphTargetManager.optimizeInfluencers = false;
             // Get preRotation matrix if the mesh had its positions baked
             const preRotMatrix = (mesh.metadata as { fbxPreRotMatrix?: Matrix | null } | undefined)?.fbxPreRotMatrix ?? null;
 
@@ -951,6 +1027,7 @@ export class FBXFileLoader implements ISceneLoaderPluginAsync {
             }
 
             if (morphTargetManager.numTargets > 0) {
+                morphTargetManager.numMaxInfluencers = morphTargetManager.numTargets;
                 mesh.morphTargetManager = morphTargetManager;
             }
         }
@@ -1017,6 +1094,7 @@ export class FBXFileLoader implements ISceneLoaderPluginAsync {
     private _createSkeleton(skin: FBXSkinData, scene: Scene): Skeleton {
         const skeleton = new Skeleton("Skeleton", "skeleton_" + skin.id.toString(), scene);
         const babylonBones: Bone[] = [];
+        const restLocalMatrices: Matrix[] = [];
 
         // Phase 1: Create bones with localMatrix = computedLcl (the bone's rest pose
         // from Lcl properties). This is what animation curves naturally target.
@@ -1036,6 +1114,7 @@ export class FBXFileLoader implements ISceneLoaderPluginAsync {
                 boneData.scalingOffset,
                 boneData.rotationOrder
             );
+            restLocalMatrices[i] = computedLcl;
 
             const bone = new Bone(
                 boneData.name,
@@ -1057,7 +1136,11 @@ export class FBXFileLoader implements ISceneLoaderPluginAsync {
             const boneData = skin.bones[i];
             const bone = babylonBones[i];
 
-            if (!boneData.transformLinkMatrix) continue;
+            if (!boneData.transformLinkMatrix) {
+                bone.updateMatrix(restLocalMatrices[i], true, true);
+                bone._updateAbsoluteBindMatrices(undefined, false);
+                continue;
+            }
 
             const absoluteBind = Matrix.FromArray(boneData.transformLinkMatrix);
 
@@ -1279,15 +1362,21 @@ export class FBXFileLoader implements ISceneLoaderPluginAsync {
 
         const animGroup = new AnimationGroup(animStack.name, scene);
 
-        // Build a map from model ID to skeleton bone for targeting
-        const modelIdToBone = new Map<bigint, Bone>();
+        // Build a map from model ID to all skeleton bones for targeting.
+        // Multiple skinned meshes can clone the same FBX armature into separate
+        // Babylon skeletons, so a single FBX animation target may need to drive
+        // more than one Bone instance.
+        const modelIdToBones = new Map<bigint, Bone[]>();
         for (let si = 0; si < skins.length; si++) {
             const skeleton = skeletons[si];
             const skin = skins[si];
             for (const boneData of skin.bones) {
                 const bone = skeleton.bones[boneData.index];
                 if (bone) {
-                    modelIdToBone.set(boneData.modelId, bone);
+                    if (!modelIdToBones.has(boneData.modelId)) {
+                        modelIdToBones.set(boneData.modelId, []);
+                    }
+                    modelIdToBones.get(boneData.modelId)!.push(bone);
                 }
             }
         }
@@ -1303,8 +1392,8 @@ export class FBXFileLoader implements ISceneLoaderPluginAsync {
                 continue;
             }
 
-            const bone = modelIdToBone.get(curveNode.targetModelId);
-            if (bone) {
+            const bones = modelIdToBones.get(curveNode.targetModelId);
+            if (bones && bones.length > 0) {
                 if (!boneCurves.has(curveNode.targetModelId)) {
                     boneCurves.set(curveNode.targetModelId, []);
                 }
@@ -1321,15 +1410,21 @@ export class FBXFileLoader implements ISceneLoaderPluginAsync {
         // No per-key correction is applied; animation curves drive the FBX local
         // transform chain, while bind matrices remain independent.
         for (const [targetId, curveNodes] of boneCurves) {
-            const bone = modelIdToBone.get(targetId)!;
+            const bones = modelIdToBones.get(targetId);
             const modelData = modelIdToData.get(targetId);
-            if (!modelData) continue;
+            if (!bones || bones.length === 0 || !modelData) continue;
 
             const animations = this._buildBoneAnimations(
-                curveNodes, bone.name, modelData
+                curveNodes,
+                bones[0].name,
+                modelData,
+                animStack.startTime,
+                animStack.stopTime
             );
-            for (const animation of animations) {
-                animGroup.addTargetedAnimation(animation, bone);
+            for (const bone of bones) {
+                for (const animation of animations) {
+                    animGroup.addTargetedAnimation(animation.clone(), bone);
+                }
             }
         }
 
@@ -1341,7 +1436,13 @@ export class FBXFileLoader implements ISceneLoaderPluginAsync {
             const modelData = modelIdToData.get(targetId);
             if (!modelData) continue;
 
-            const animations = this._buildNodeAnimations(curveNodes, node.name, modelData);
+            const animations = this._buildNodeAnimations(
+                curveNodes,
+                node.name,
+                modelData,
+                animStack.startTime,
+                animStack.stopTime
+            );
             for (const animation of animations) {
                 animGroup.addTargetedAnimation(animation, node);
             }
@@ -1362,16 +1463,18 @@ export class FBXFileLoader implements ISceneLoaderPluginAsync {
 
                 const target = mesh.morphTargetManager.getTarget(targetIndex);
                 if (target && curveNode.curves.length > 0) {
-                    const curve = curveNode.curves[0];
                     const fps = 30;
                     const anim = new Animation(
                         `${target.name}_influence`, "influence", fps,
                         Animation.ANIMATIONTYPE_FLOAT, Animation.ANIMATIONLOOPMODE_CYCLE
                     );
-                    const keys = curve.keys.map(k => ({
-                        frame: k.time * fps,
-                        value: k.value / 100, // FBX uses 0-100, Babylon uses 0-1
-                    }));
+                    const keys = buildScalarAnimationKeys(
+                        curveNode.curves[0],
+                        fps,
+                        animStack.startTime,
+                        animStack.stopTime,
+                        (value) => value / 100 // FBX uses 0-100, Babylon uses 0-1
+                    );
                     anim.setKeys(keys);
                     animGroup.addTargetedAnimation(anim, target);
                     targetFound = true;
@@ -1381,7 +1484,7 @@ export class FBXFileLoader implements ISceneLoaderPluginAsync {
 
         // Normalize the animation group
         if (animGroup.targetedAnimations.length > 0) {
-            animGroup.normalize(0, animStack.duration * 30);
+            animGroup.normalize(animStack.startTime * 30, animStack.stopTime * 30);
             return animGroup;
         }
 
@@ -1396,7 +1499,9 @@ export class FBXFileLoader implements ISceneLoaderPluginAsync {
     private _buildNodeAnimations(
         curveNodes: FBXCurveNodeData[],
         nodeName: string,
-        modelData: FBXModelData
+        modelData: FBXModelData,
+        startTime: number,
+        stopTime: number
     ): Animation[] {
         const fps = 30;
 
@@ -1405,16 +1510,7 @@ export class FBXFileLoader implements ISceneLoaderPluginAsync {
         const rNode = curveNodes.find(cn => cn.type === "R");
         const sNode = curveNodes.find(cn => cn.type === "S");
 
-        // Collect all unique time points across all curves
-        const timeSet = new Set<number>();
-        for (const cn of curveNodes) {
-            for (const curve of cn.curves) {
-                for (const key of curve.keys) {
-                    timeSet.add(key.time);
-                }
-            }
-        }
-        const times = [...timeSet].sort((a, b) => a - b);
+        const times = collectAnimationSampleTimes(curveNodes, fps, startTime, stopTime);
         if (times.length === 0) return [];
 
         // Get curve accessors
@@ -1438,15 +1534,15 @@ export class FBXFileLoader implements ISceneLoaderPluginAsync {
             const frame = time * fps;
 
             // Sample animated values, falling back to model's base values
-            const tx = sampleCurveAtTime(txCurve, time) ?? modelData.translation[0];
-            const ty = sampleCurveAtTime(tyCurve, time) ?? modelData.translation[1];
-            const tz = sampleCurveAtTime(tzCurve, time) ?? modelData.translation[2];
-            const rx = sampleCurveAtTime(rxCurve, time) ?? modelData.rotation[0];
-            const ry = sampleCurveAtTime(ryCurve, time) ?? modelData.rotation[1];
-            const rz = sampleCurveAtTime(rzCurve, time) ?? modelData.rotation[2];
-            const sx = sampleCurveAtTime(sxCurve, time) ?? modelData.scale[0];
-            const sy = sampleCurveAtTime(syCurve, time) ?? modelData.scale[1];
-            const sz = sampleCurveAtTime(szCurve, time) ?? modelData.scale[2];
+            const tx = sampleFBXCurveAtTime(txCurve, time) ?? modelData.translation[0];
+            const ty = sampleFBXCurveAtTime(tyCurve, time) ?? modelData.translation[1];
+            const tz = sampleFBXCurveAtTime(tzCurve, time) ?? modelData.translation[2];
+            const rx = sampleFBXCurveAtTime(rxCurve, time) ?? modelData.rotation[0];
+            const ry = sampleFBXCurveAtTime(ryCurve, time) ?? modelData.rotation[1];
+            const rz = sampleFBXCurveAtTime(rzCurve, time) ?? modelData.rotation[2];
+            const sx = sampleFBXCurveAtTime(sxCurve, time) ?? modelData.scale[0];
+            const sy = sampleFBXCurveAtTime(syCurve, time) ?? modelData.scale[1];
+            const sz = sampleFBXCurveAtTime(szCurve, time) ?? modelData.scale[2];
 
             // Compute the full FBX local transform matrix with pivots
             const localMatrix = FBXFileLoader._computeFBXLocalMatrix(
@@ -1529,15 +1625,16 @@ export class FBXFileLoader implements ISceneLoaderPluginAsync {
     }
 
     /**
-     * Build matrix-baked bone animation with TL/Lcl correction.
-     * Computes the full FBX local matrix at each keyframe, applies
-     * the correction (TL_local × inv(computedLcl)) to map from
-     * Lcl animation space into TL bind space, then decomposes to TRS.
+     * Build matrix-baked bone animation from full FBX local transforms.
+     * The bind matrix carries the skinning offset, so animation curves drive
+     * the same FBX local transform chain as the source skeleton.
      */
     private _buildBoneAnimations(
         curveNodes: FBXCurveNodeData[],
         boneName: string,
-        modelData: FBXModelData
+        modelData: FBXModelData,
+        startTime: number,
+        stopTime: number
     ): Animation[] {
         const fps = 30;
 
@@ -1546,16 +1643,7 @@ export class FBXFileLoader implements ISceneLoaderPluginAsync {
         const rNode = curveNodes.find(cn => cn.type === "R");
         const sNode = curveNodes.find(cn => cn.type === "S");
 
-        // Collect all unique time points
-        const timeSet = new Set<number>();
-        for (const cn of curveNodes) {
-            for (const curve of cn.curves) {
-                for (const key of curve.keys) {
-                    timeSet.add(key.time);
-                }
-            }
-        }
-        const times = [...timeSet].sort((a, b) => a - b);
+        const times = collectAnimationSampleTimes(curveNodes, fps, startTime, stopTime);
         if (times.length === 0) return [];
 
         // Get curve accessors
@@ -1578,15 +1666,15 @@ export class FBXFileLoader implements ISceneLoaderPluginAsync {
             const frame = time * fps;
 
             // Sample animated values, falling back to model's base values
-            const tx = sampleCurveAtTime(txCurve, time) ?? modelData.translation[0];
-            const ty = sampleCurveAtTime(tyCurve, time) ?? modelData.translation[1];
-            const tz = sampleCurveAtTime(tzCurve, time) ?? modelData.translation[2];
-            const rx = sampleCurveAtTime(rxCurve, time) ?? modelData.rotation[0];
-            const ry = sampleCurveAtTime(ryCurve, time) ?? modelData.rotation[1];
-            const rz = sampleCurveAtTime(rzCurve, time) ?? modelData.rotation[2];
-            const sx = sampleCurveAtTime(sxCurve, time) ?? modelData.scale[0];
-            const sy = sampleCurveAtTime(syCurve, time) ?? modelData.scale[1];
-            const sz = sampleCurveAtTime(szCurve, time) ?? modelData.scale[2];
+            const tx = sampleFBXCurveAtTime(txCurve, time) ?? modelData.translation[0];
+            const ty = sampleFBXCurveAtTime(tyCurve, time) ?? modelData.translation[1];
+            const tz = sampleFBXCurveAtTime(tzCurve, time) ?? modelData.translation[2];
+            const rx = sampleFBXCurveAtTime(rxCurve, time) ?? modelData.rotation[0];
+            const ry = sampleFBXCurveAtTime(ryCurve, time) ?? modelData.rotation[1];
+            const rz = sampleFBXCurveAtTime(rzCurve, time) ?? modelData.rotation[2];
+            const sx = sampleFBXCurveAtTime(sxCurve, time) ?? modelData.scale[0];
+            const sy = sampleFBXCurveAtTime(syCurve, time) ?? modelData.scale[1];
+            const sz = sampleFBXCurveAtTime(szCurve, time) ?? modelData.scale[2];
 
             // Compute the full FBX local matrix from animated Lcl values
             const localMatrix = FBXFileLoader._computeFBXLocalMatrix(
@@ -1735,9 +1823,9 @@ export class FBXFileLoader implements ISceneLoaderPluginAsync {
         const keys: { frame: number; value: Vector3 }[] = [];
         for (const time of times) {
             const frame = time * fps;
-            const x = sampleCurveAtTime(xCurve, time) ?? 0;
-            const y = sampleCurveAtTime(yCurve, time) ?? 0;
-            const z = sampleCurveAtTime(zCurve, time) ?? 0;
+            const x = sampleFBXCurveAtTime(xCurve, time) ?? 0;
+            const y = sampleFBXCurveAtTime(yCurve, time) ?? 0;
+            const z = sampleFBXCurveAtTime(zCurve, time) ?? 0;
             keys.push({
                 frame,
                 value: new Vector3(x, y, z),
@@ -1790,9 +1878,9 @@ export class FBXFileLoader implements ISceneLoaderPluginAsync {
         let prevQuat: Quaternion | null = null;
         for (const time of times) {
             const frame = time * fps;
-            const rx = (sampleCurveAtTime(xCurve, time) ?? 0) * d2r;
-            const ry = (sampleCurveAtTime(yCurve, time) ?? 0) * d2r;
-            const rz = (sampleCurveAtTime(zCurve, time) ?? 0) * d2r;
+            const rx = (sampleFBXCurveAtTime(xCurve, time) ?? 0) * d2r;
+            const ry = (sampleFBXCurveAtTime(yCurve, time) ?? 0) * d2r;
+            const rz = (sampleFBXCurveAtTime(zCurve, time) ?? 0) * d2r;
 
             // Combined rotation: Rlcl * Rpre (row-vector convention)
             // Lcl Rotation uses the node's RotationOrder
@@ -1837,30 +1925,125 @@ function float64To32(arr: Float64Array): Float32Array {
     return result;
 }
 
-/** Sample a curve at a given time with linear interpolation */
-function sampleCurveAtTime(
-    curveData: { keys: { time: number; value: number }[] } | undefined,
-    time: number
-): number | null {
-    if (!curveData || curveData.keys.length === 0) return null;
+function collectAnimationSampleTimes(
+    curveNodes: FBXCurveNodeData[],
+    fps: number,
+    startTime: number,
+    stopTime: number
+): number[] {
+    let minTime = Number.POSITIVE_INFINITY;
+    let maxTime = Number.NEGATIVE_INFINITY;
+    const sourceTimes = new Set<number>();
 
-    const keys = curveData.keys;
-
-    // Before first key
-    if (time <= keys[0].time) return keys[0].value;
-    // After last key
-    if (time >= keys[keys.length - 1].time) return keys[keys.length - 1].value;
-
-    // Find surrounding keys and interpolate
-    for (let i = 0; i < keys.length - 1; i++) {
-        if (time >= keys[i].time && time <= keys[i + 1].time) {
-            const t =
-                keys[i + 1].time === keys[i].time
-                    ? 0
-                    : (time - keys[i].time) / (keys[i + 1].time - keys[i].time);
-            return keys[i].value + t * (keys[i + 1].value - keys[i].value);
+    for (const curveNode of curveNodes) {
+        for (const curve of curveNode.curves) {
+            for (const key of curve.keys) {
+                minTime = Math.min(minTime, key.time);
+                maxTime = Math.max(maxTime, key.time);
+                if (key.time >= startTime && key.time <= stopTime) {
+                    sourceTimes.add(key.time);
+                }
+            }
         }
     }
 
-    return keys[keys.length - 1].value;
+    if (!Number.isFinite(minTime) || !Number.isFinite(maxTime)) return [];
+
+    const rangeStart = stopTime > startTime ? startTime : minTime;
+    const rangeStop = stopTime > startTime ? stopTime : maxTime;
+    const times = new Set<number>([rangeStart, rangeStop, ...sourceTimes]);
+    const startFrame = Math.ceil(rangeStart * fps);
+    const stopFrame = Math.floor(rangeStop * fps);
+
+    for (let frame = startFrame; frame <= stopFrame; frame++) {
+        times.add(frame / fps);
+    }
+
+    return [...times].sort((a, b) => a - b);
 }
+
+function buildScalarAnimationKeys(
+    curve: FBXCurveData,
+    fps: number,
+    startTime: number,
+    stopTime: number,
+    mapValue: (value: number) => number
+): IAnimationKey[] {
+    const range = getCurveSampleRange(curve, startTime, stopTime);
+    const keys = curve.keys
+        .filter((key) => key.time >= range.start && key.time <= range.stop)
+        .map((key) => ({
+            source: key,
+            frame: key.time * fps,
+            value: mapValue(key.value),
+        }));
+
+    if (!keys.some((key) => Math.abs(key.source.time - range.start) < 1e-6)) {
+        keys.unshift({
+            source: {
+                time: range.start,
+                value: sampleFBXCurveAtTime(curve, range.start) ?? 0,
+                interpolation: "linear",
+            },
+            frame: range.start * fps,
+            value: mapValue(sampleFBXCurveAtTime(curve, range.start) ?? 0),
+        });
+    }
+
+    if (!keys.some((key) => Math.abs(key.source.time - range.stop) < 1e-6)) {
+        keys.push({
+            source: {
+                time: range.stop,
+                value: sampleFBXCurveAtTime(curve, range.stop) ?? 0,
+                interpolation: "linear",
+            },
+            frame: range.stop * fps,
+            value: mapValue(sampleFBXCurveAtTime(curve, range.stop) ?? 0),
+        });
+    }
+
+    const animationKeys: IAnimationKey[] = keys.map((key) => ({
+        frame: key.frame,
+        value: key.value,
+    }));
+
+    for (let i = 0; i < keys.length - 1; i++) {
+        const key = keys[i].source;
+        const nextAnimationKey = animationKeys[i + 1];
+
+        if (key.interpolation === "constant") {
+            animationKeys[i].interpolation = AnimationKeyInterpolation.STEP;
+            continue;
+        }
+
+        if (key.interpolation !== "cubic") continue;
+
+        const nextKey = keys[i + 1].source;
+        const duration = Math.max(nextKey.time - key.time, 1e-6);
+        const linearSlope = (nextKey.value - key.value) / duration;
+        animationKeys[i].outTangent = mapSlope(key.rightSlope ?? linearSlope, mapValue) / fps;
+        nextAnimationKey.inTangent = mapSlope(key.nextLeftSlope ?? linearSlope, mapValue) / fps;
+    }
+
+    return animationKeys;
+}
+
+function mapSlope(slope: number, mapValue: (value: number) => number): number {
+    return mapValue(slope) - mapValue(0);
+}
+
+function getCurveSampleRange(
+    curve: FBXCurveData,
+    startTime: number,
+    stopTime: number
+): { start: number; stop: number } {
+    if (stopTime > startTime) {
+        return { start: startTime, stop: stopTime };
+    }
+
+    return {
+        start: curve.keys[0]?.time ?? 0,
+        stop: curve.keys[curve.keys.length - 1]?.time ?? 0,
+    };
+}
+

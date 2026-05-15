@@ -4,14 +4,29 @@ import { resolve, dirname } from "path";
 import { fileURLToPath } from "url";
 import { parseBinaryFBX } from "../../src/parsers/fbxBinaryParser.js";
 import { interpretFBX } from "../../src/interpreter/fbxInterpreter.js";
+import { sampleFBXCurveAtTime } from "../../src/interpreter/animation.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
-const spiderPath = resolve(__dirname, "../models/spider-animated-character/source/Spider_sketchfab.fbx");
+const spiderPath = resolve(__dirname, "../models/spider-animated-character/Spider_sketchfab.fbx");
+const bristlebackPath = resolve(__dirname, "../models/bristleback-dota-fan-art/POSE.fbx");
+const wwiPlanePath = resolve(__dirname, "../models/stylized-ww1-plane/PlaneAnimated with toon.fbx");
 
 function loadSpider() {
     const buf = readFileSync(spiderPath);
-    const doc = parseBinaryFBX(buf.buffer);
+    const doc = parseBinaryFBX(buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength));
+    return interpretFBX(doc);
+}
+
+function loadBristleback() {
+    const buf = readFileSync(bristlebackPath);
+    const doc = parseBinaryFBX(buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength));
+    return interpretFBX(doc);
+}
+
+function loadWWIPlane() {
+    const buf = readFileSync(wwiPlanePath);
+    const doc = parseBinaryFBX(buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength));
     return interpretFBX(doc);
 }
 
@@ -97,6 +112,67 @@ describe("Skeleton extraction", () => {
             (b) => b.transformLinkMatrix !== null
         );
         expect(bonesWithMatrices.length).toBeGreaterThan(0);
+    });
+
+    it("should preserve non-cluster skeleton ancestors", () => {
+        const scene = loadBristleback();
+        const bipedSkins = scene.skins.filter((skin) => skin.bones[0]?.name === "Bip001");
+
+        expect(bipedSkins.length).toBeGreaterThan(0);
+
+        for (const skin of bipedSkins) {
+            const bipedRoot = skin.bones[0];
+            const pelvis = skin.bones.find((bone) => bone.name === "Bip001 Pelvis");
+
+            expect(bipedRoot.parentIndex).toBe(-1);
+            expect(bipedRoot.transformLinkMatrix).toBeNull();
+            expect(pelvis).toBeDefined();
+            expect(pelvis!.parentIndex).toBe(bipedRoot.index);
+            expect(skin.bones.some((bone) => bone.transformLinkMatrix !== null)).toBe(true);
+        }
+    });
+
+    it("should use declared animation stack time span when present", () => {
+        const scene = loadBristleback();
+        const animation = scene.animations.find((anim) => anim.name === "animtion_bristleback_base");
+
+        expect(animation).toBeDefined();
+        expect(animation!.startTime).toBeCloseTo(0, 5);
+        expect(animation!.stopTime).toBeCloseTo(4, 5);
+        expect(animation!.duration).toBeCloseTo(4, 5);
+    });
+
+    it("should preserve declared animation stack duration after keyframe rebasing", () => {
+        const scene = loadWWIPlane();
+        const animation = scene.animations.find((anim) => anim.name === "Take 001");
+
+        expect(animation).toBeDefined();
+        expect(animation!.startTime * 30).toBeCloseTo(0, 3);
+        expect(animation!.stopTime * 30).toBeCloseTo(148.75, 3);
+    });
+
+    it("should preserve Bristleback cubic morph curve interpolation", () => {
+        const scene = loadBristleback();
+        const channel = scene.blendShapes
+            .flatMap((blendShape) => blendShape.channels)
+            .find((c) => c.name === "body_morph_4");
+        const animation = scene.animations.find((anim) => anim.name === "animtion_bristleback_base");
+        const curveNode = animation?.curveNodes.find((cn) => cn.targetModelId === channel?.id);
+        const curve = curveNode?.curves[0];
+
+        expect(channel).toBeDefined();
+        expect(curve).toBeDefined();
+
+        const peakKey = curve!.keys.find((key) => Math.abs(key.time * 30 - 16) < 0.001);
+        expect(peakKey).toBeDefined();
+        expect(peakKey!.interpolation).toBe("cubic");
+        expect(peakKey!.rightSlope).toBeCloseTo(60.857, 3);
+        expect(peakKey!.nextLeftSlope).toBeCloseTo(0, 5);
+
+        const cubicFrame18 = sampleFBXCurveAtTime(curve!, 18 / 30);
+        const linearFrame18 = 30.738998 + ((18 - 16) / (28 - 16)) * (56.799999 - 30.738998);
+        expect(cubicFrame18).toBeCloseTo(35.487, 3);
+        expect(cubicFrame18!).toBeGreaterThan(linearFrame18);
     });
 });
 

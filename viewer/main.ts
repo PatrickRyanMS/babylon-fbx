@@ -1,13 +1,20 @@
 import { Engine } from "@babylonjs/core/Engines/engine.js";
 import { Scene } from "@babylonjs/core/scene.js";
 import { ArcRotateCamera } from "@babylonjs/core/Cameras/arcRotateCamera.js";
-import { HemisphericLight } from "@babylonjs/core/Lights/hemisphericLight.js";
-import { Vector3 } from "@babylonjs/core/Maths/math.vector.js";
+import { DirectionalLight } from "@babylonjs/core/Lights/directionalLight.js";
+import { Matrix, Vector3 } from "@babylonjs/core/Maths/math.vector.js";
 import { Color3, Color4 } from "@babylonjs/core/Maths/math.color.js";
 import { SceneLoader } from "@babylonjs/core/Loading/sceneLoader.js";
+import { VertexBuffer } from "@babylonjs/core/Buffers/buffer.js";
+import { MultiMaterial } from "@babylonjs/core/Materials/multiMaterial.js";
 import { StandardMaterial } from "@babylonjs/core/Materials/standardMaterial.js";
+import { PBRMaterial } from "@babylonjs/core/Materials/PBR/pbrMaterial.js";
+import { CubeTexture } from "@babylonjs/core/Materials/Textures/cubeTexture.js";
 import { Texture } from "@babylonjs/core/Materials/Textures/texture.js";
+import { TransformNode } from "@babylonjs/core/Meshes/transformNode.js";
+import "@babylonjs/core/Materials/Textures/Loaders/envTextureLoader.js";
 import type { ISceneLoaderAsyncResult } from "@babylonjs/core/Loading/sceneLoader.js";
+import type { BaseTexture } from "@babylonjs/core/Materials/Textures/baseTexture.js";
 
 // PBR material support (required for GLB/glTF models)
 import "@babylonjs/core/Materials/PBR/pbrMaterial.js";
@@ -20,195 +27,455 @@ import "@babylonjs/core/Shaders/postprocess.vertex.js";
 import "@babylonjs/loaders/glTF/2.0/index.js";
 
 import { FBXFileLoader } from "../src/fbxFileLoader.js";
+import studioEnvironmentUrl from "./studio.env?url";
 
-// Import model URLs via Vite's ?url transform (works for assets outside root)
+// Import test assets via Vite's ?url transform (works for assets outside root).
+const assetUrls = import.meta.glob<string>(
+    "../tests/models/**/*.{fbx,FBX,glb,GLB,png,PNG,jpg,JPG,jpeg,JPEG,webp,WEBP}",
+    { eager: true, query: "?url", import: "default" }
+);
 
-// Spider
-import spiderFbxUrl from "../tests/models/spider-animated-character/source/Spider_sketchfab.fbx?url";
-import spiderTexUrl from "../tests/models/spider-animated-character/textures/Spider.png?url";
-import spiderGroundTexUrl from "../tests/models/spider-animated-character/textures/ground_3.png?url";
-import spiderGlbUrl from "../tests/models/spider-animated-character/spider_animated_character.glb?url";
-
-// Valkyrie
-import valkBinaryUrl from "../tests/models/valkyrie/valkyrie_asset.fbx?url";
-import valkAsciiUrl from "../tests/models/valkyrie/valkyrie_asset_ascii.fbx?url";
-import valkTextureUrl from "../tests/models/valkyrie/valkyrie_low_baseColor.jpg?url";
-
-// Behemot Cat
-import catFbxUrl from "../tests/models/behemot-cat/source/LowPoly_Cat_V04.fbx?url";
-import catTexUrl from "../tests/models/behemot-cat/textures/Cat_BC.png?url";
-import catOpacityUrl from "../tests/models/behemot-cat/textures/Cat_Opacity.png?url";
-
-// Phoenix Bird
-import phoenixFbxUrl from "../tests/models/phoenix-bird/source/fly.fbx?url";
-import phoenixDiffAUrl from "../tests/models/phoenix-bird/textures/Tex_Ride_FengHuang_01a_D_A.tga.png?url";
-import phoenixEmissAUrl from "../tests/models/phoenix-bird/textures/Tex_Ride_FengHuang_01a_E.tga.png?url";
-import phoenixDiffBUrl from "../tests/models/phoenix-bird/textures/Tex_Ride_FengHuang_01b_D_A.tga.png?url";
-import phoenixEmissBUrl from "../tests/models/phoenix-bird/textures/Tex_Ride_FengHuang_01b_E.tga.png?url";
-
-// Stylized WW1 Plane
-import planeFbxUrl from "../tests/models/stylized-ww1-plane/source/PlaneAnimated with toon.fbx?url";
-import planeBlurUrl from "../tests/models/stylized-ww1-plane/textures/blur_effect4.png?url";
-import planeRgbUrl from "../tests/models/stylized-ww1-plane/textures/RGB.jpeg?url";
-
-// Hover Bike
-import bikeFbxUrl from "../tests/models/hover-bike-the-rocket/source/TheRocketAnimation.fbx?url";
-import bikeColorUrl from "../tests/models/hover-bike-the-rocket/textures/Color.png?url";
-import bikeEmissiveUrl from "../tests/models/hover-bike-the-rocket/textures/Emissive.png?url";
-import bikeNormalUrl from "../tests/models/hover-bike-the-rocket/textures/Normal.png?url";
-
-// Mech Drone
-import droneFbxUrl from "../tests/models/mech-drone/source/Drone.FBX?url";
-import droneDiffUrl from "../tests/models/mech-drone/textures/Drone_diff.jpeg?url";
-import droneEmissiveUrl from "../tests/models/mech-drone/textures/Drone_emissive.jpeg?url";
-import droneNormalUrl from "../tests/models/mech-drone/textures/Drone_normal.jpeg?url";
-
-// Jet Car (vertex colors)
-import carFbxUrl from "../tests/models/40min-draft-jet-car-vertex-color/Car.fbx?url";
-
-// Gandalf Sax Animated PC Set
-import gandalfFbxUrl from "../tests/models/gandalf-sax-animated-pc-set/source/Double_Display_Composition_04.fbx?url";
-import gandalfDisplayBaseUrl from "../tests/models/gandalf-sax-animated-pc-set/textures/Double_Display_Base_Color.png?url";
-import gandalfDisplayNormalUrl from "../tests/models/gandalf-sax-animated-pc-set/textures/Double_Display_Normal_DirectX.png?url";
-import gandalfDisplayMetallicUrl from "../tests/models/gandalf-sax-animated-pc-set/textures/Double_Display_Metallic.png?url";
-import gandalfDisplayRoughnessUrl from "../tests/models/gandalf-sax-animated-pc-set/textures/Double_Display_Roughness.png?url";
-import gandalfKeyboardBaseUrl from "../tests/models/gandalf-sax-animated-pc-set/textures/Mechan_Keyboard_Base_Color.png?url";
-import gandalfKeyboardNormalUrl from "../tests/models/gandalf-sax-animated-pc-set/textures/Mechan_Keyboard_Normal_DirectX.png?url";
-import gandalfKeyboardOpacityUrl from "../tests/models/gandalf-sax-animated-pc-set/textures/Mechan_Keyboard_Opacity.png?url";
-import gandalfMouseBaseUrl from "../tests/models/gandalf-sax-animated-pc-set/textures/PC_Mouse_BaseColor.png?url";
-import gandalfMouseNormalUrl from "../tests/models/gandalf-sax-animated-pc-set/textures/PC_Mouse_Normal.png?url";
-
-// Mannequin (animated, with normal/roughness/specular textures)
-import mannequinFbxUrl from "../tests/models/mannequin-anatomy-aid-free-download/source/Mannequin_Animation.FBX?url";
-import mannequinDiffuseUrl from "../tests/models/mannequin-anatomy-aid-free-download/textures/Diffuse.jpeg?url";
-import mannequinNormalUrl from "../tests/models/mannequin-anatomy-aid-free-download/textures/Normal.jpeg?url";
-import mannequinRoughnessUrl from "../tests/models/mannequin-anatomy-aid-free-download/textures/Roughness.jpeg?url";
-import mannequinSpecularUrl from "../tests/models/mannequin-anatomy-aid-free-download/textures/Specular.jpeg?url";
+function assetUrl(relativePath: string): string {
+    const url = assetUrls[`../tests/models/${relativePath}`];
+    if (!url) {
+        throw new Error(`Missing viewer asset: ${relativePath}`);
+    }
+    return url;
+}
 
 // Register the FBX loader
 SceneLoader.RegisterPlugin(new FBXFileLoader());
 
-// Model catalog — add new models here
+interface ViewerPBRMaterialOverride {
+    materialName: string;
+    albedoTextureHasAlpha?: boolean;
+    useAlphaFromAlbedoTexture?: boolean;
+    useAdditiveAlpha?: boolean;
+    transparencyMode?: "opaque" | "alphaTest" | "alphaBlend";
+    metallic?: number;
+    roughness?: number;
+}
+
+interface ViewerTextureOverride {
+    slot: string;
+    url: string;
+    materialName?: string;
+    coordinatesIndex?: number;
+    useAlphaFromRGB?: boolean;
+}
+
+interface ViewerTextureOverrideSource {
+    slot: string;
+    path: string;
+    materialName?: string;
+    coordinatesIndex?: number;
+    useAlphaFromRGB?: boolean;
+}
+
+interface ViewerModelOverride {
+    name?: string;
+    textures?: ViewerTextureOverrideSource[];
+    pbrMaterialOverrides?: ViewerPBRMaterialOverride[];
+    defaultAnimation?: string;
+    forceOpaque?: boolean;
+    viewerRotationYDegrees?: number;
+}
+
 interface ModelEntry {
     name: string;
+    path: string;
     url: string;
     /** "fbx" uses our custom loader, "glb" uses Babylon's built-in GLTF loader */
     format: "fbx" | "glb";
-    /** Map of texture slot → resolved URL. Slots: "diffuse", "normal", "emissive", etc. */
-    textures: { slot: string; url: string; materialName?: string }[];
+    /** Legacy manual texture overrides; FBX models now use the viewer-only PBR manifest path. */
+    textures: ViewerTextureOverride[];
+    /** Viewer-only PBR material fixes for assets that need manual flags beyond texture inference. */
+    pbrMaterialOverrides?: ViewerPBRMaterialOverride[];
     /** Name of the animation clip to auto-play on load (defaults to first clip) */
     defaultAnimation?: string;
     /** Force all materials to opaque (fixes z-fighting from erroneous transparency) */
     forceOpaque?: boolean;
+    /** Viewer-only root yaw adjustment, in degrees. */
+    viewerRotationYDegrees?: number;
 }
 
-const models: ModelEntry[] = [
-    {
+const DEFAULT_MODEL_PATH = "spider-animated-character/Spider_sketchfab.fbx";
+const MODEL_QUERY_PARAM = "model";
+
+const modelOverrides: Record<string, ViewerModelOverride> = {
+    "spider-animated-character/Spider_sketchfab.fbx": {
         name: "Spider (FBX, animated)",
-        url: spiderFbxUrl,
-        format: "fbx",
         defaultAnimation: "Spider_Walk",
         textures: [
-            { slot: "diffuse", url: spiderTexUrl, materialName: "Spider_M" },
-            { slot: "diffuse", url: spiderGroundTexUrl, materialName: "Camera_lambert2" },
+            { slot: "diffuse", path: "spider-animated-character/Spider.png", materialName: "Spider_M" },
+            { slot: "diffuse", path: "spider-animated-character/ground_3.png", materialName: "Camera_lambert2" },
         ],
     },
-    {
+    "spider-animated-character/spider_animated_character.glb": {
         name: "Spider (GLB reference)",
-        url: spiderGlbUrl,
-        format: "glb",
         defaultAnimation: "Spider_Walk",
-        textures: [],
     },
-    {
+    "valkyrie/valkyrie_asset.fbx": {
         name: "Valkyrie (binary v7.7)",
-        url: valkBinaryUrl,
-        format: "fbx",
-        textures: [{ slot: "diffuse", url: valkTextureUrl }],
+        textures: [{ slot: "diffuse", path: "valkyrie/valkyrie_low_baseColor.jpg" }],
     },
-    {
+    "valkyrie/valkyrie_asset_ascii.fbx": {
         name: "Valkyrie (ASCII v7.7)",
-        url: valkAsciiUrl,
-        format: "fbx",
-        textures: [{ slot: "diffuse", url: valkTextureUrl }],
+        textures: [{ slot: "diffuse", path: "valkyrie/valkyrie_low_baseColor.jpg" }],
     },
-    {
+    "behemot-cat/LowPoly_Cat_V04.fbx": {
         name: "Behemot Cat",
-        url: catFbxUrl,
-        format: "fbx",
         textures: [
-            { slot: "diffuse", url: catTexUrl },
-            { slot: "opacity", url: catOpacityUrl },
+            { slot: "diffuse", path: "behemot-cat/Cat_BC.png" },
+            { slot: "opacity", path: "behemot-cat/Cat_Opacity.png" },
         ],
     },
-    {
+    "phoenix-bird/fly.fbx": {
         name: "Phoenix Bird (animated)",
-        url: phoenixFbxUrl,
-        format: "fbx",
         forceOpaque: true,
         textures: [
-            { slot: "diffuse", url: phoenixDiffAUrl },
-            { slot: "emissive", url: phoenixEmissAUrl },
+            { slot: "diffuse", path: "phoenix-bird/Tex_Ride_FengHuang_01a_D_A.tga.png" },
+            { slot: "emissive", path: "phoenix-bird/Tex_Ride_FengHuang_01a_E.tga.png" },
         ],
     },
-    {
+    "stylized-ww1-plane/PlaneAnimated with toon.fbx": {
         name: "WW1 Plane (animated)",
-        url: planeFbxUrl,
-        format: "fbx",
         textures: [
-            { slot: "diffuse", url: planeRgbUrl },
+            { slot: "diffuse", path: "stylized-ww1-plane/RGB.jpeg" },
+        ],
+        pbrMaterialOverrides: [
+            {
+                materialName: "Blur_effect",
+                albedoTextureHasAlpha: true,
+                useAlphaFromAlbedoTexture: true,
+            },
         ],
     },
-    {
+    "hover-bike-the-rocket/TheRocketAnimation.fbx": {
         name: "Hover Bike (animated)",
-        url: bikeFbxUrl,
-        format: "fbx",
         textures: [
-            { slot: "diffuse", url: bikeColorUrl },
-            { slot: "emissive", url: bikeEmissiveUrl },
-            { slot: "normal", url: bikeNormalUrl },
+            { slot: "diffuse", path: "hover-bike-the-rocket/Color.png" },
+            { slot: "emissive", path: "hover-bike-the-rocket/Emissive.png" },
+            { slot: "normal", path: "hover-bike-the-rocket/Normal.png" },
         ],
     },
-    {
+    "mech-drone/Drone.FBX": {
         name: "Mech Drone",
-        url: droneFbxUrl,
-        format: "fbx",
         textures: [
-            { slot: "diffuse", url: droneDiffUrl },
-            { slot: "emissive", url: droneEmissiveUrl },
-            { slot: "normal", url: droneNormalUrl },
+            { slot: "diffuse", path: "mech-drone/Drone_diff.jpg", materialName: "Robot" },
+            { slot: "emissive", path: "mech-drone/Drone_emissive.jpg", materialName: "Robot" },
+            { slot: "normal", path: "mech-drone/Drone_normal.jpg", materialName: "Robot" },
         ],
+        pbrMaterialOverrides: [
+            {
+                materialName: "Fire",
+                useAdditiveAlpha: true,
+            },
+        ],
+        viewerRotationYDegrees: 180,
     },
-    {
+    "40min-draft-jet-car-vertex-color/Car.fbx": {
         name: "Jet Car (vertex colors)",
-        url: carFbxUrl,
-        format: "fbx",
-        textures: [],
     },
-    {
+    "alfa-romeo-stradale-1967/finish91.fbx": {
+        name: "Alfa Romeo Stradale 1967",
+        textures: [
+            { slot: "ambientOcclusion", path: "alfa-romeo-stradale-1967/AoJ2.jpeg", materialName: "forMayaAO:mi_car_paint_phen2", coordinatesIndex: 0 },
+            { slot: "diffuse", path: "alfa-romeo-stradale-1967/uvKoldefuz2.png", materialName: "forMayaAO:phong2", coordinatesIndex: 1 },
+            { slot: "roughness", path: "alfa-romeo-stradale-1967/uvKolRough.png", materialName: "forMayaAO:phong2", coordinatesIndex: 1 },
+            { slot: "normal", path: "alfa-romeo-stradale-1967/uvNom3bmp.png", materialName: "forMayaAO:number", coordinatesIndex: 1 },
+            { slot: "opacity", path: "alfa-romeo-stradale-1967/setkaAlfa2.png", materialName: "forMayaAO:Grill2", coordinatesIndex: 1, useAlphaFromRGB: true },
+            { slot: "normal", path: "alfa-romeo-stradale-1967/setkabmp.png", materialName: "forMayaAO:Grill2", coordinatesIndex: 1 },
+            { slot: "normal", path: "alfa-romeo-stradale-1967/headlight2bmp.png", materialName: "forMayaAO:frontLights", coordinatesIndex: 1 },
+        ],
+        pbrMaterialOverrides: [
+            { materialName: "Chrome", metallic: 1, roughness: 0.18 },
+            { materialName: "Chrome_2", metallic: 1, roughness: 0.22 },
+            { materialName: "miror", metallic: 1, roughness: 0.05 },
+            { materialName: "chromedvorn", metallic: 1, roughness: 0.2 },
+            { materialName: "forMayaAO:mi_car_paint_phen2", metallic: 0, roughness: 0.18 },
+            { materialName: "forMayaAO:Grill2", transparencyMode: "alphaTest" },
+        ],
+    },
+    "gandalf-sax-animated-pc-set/Double_Display_Composition_04.fbx": {
         name: "Gandalf Sax PC Set (animated)",
-        url: gandalfFbxUrl,
-        format: "fbx",
         textures: [
-            { slot: "diffuse", url: gandalfDisplayBaseUrl, materialName: "Double_Display" },
-            { slot: "normal", url: gandalfDisplayNormalUrl, materialName: "Double_Display" },
-            { slot: "diffuse", url: gandalfKeyboardBaseUrl, materialName: "Mechan_Keyboard" },
-            { slot: "normal", url: gandalfKeyboardNormalUrl, materialName: "Mechan_Keyboard" },
-            { slot: "opacity", url: gandalfKeyboardOpacityUrl, materialName: "Mechan_Keyboard" },
-            { slot: "diffuse", url: gandalfMouseBaseUrl, materialName: "PC_Mouse" },
-            { slot: "normal", url: gandalfMouseNormalUrl, materialName: "PC_Mouse" },
+            { slot: "diffuse", path: "gandalf-sax-animated-pc-set/Double_Display_Base_Color.png", materialName: "Double_Display" },
+            { slot: "normal", path: "gandalf-sax-animated-pc-set/Double_Display_Normal_DirectX.png", materialName: "Double_Display" },
+            { slot: "diffuse", path: "gandalf-sax-animated-pc-set/Mechan_Keyboard_Base_Color.png", materialName: "Mechan_Keyboard" },
+            { slot: "normal", path: "gandalf-sax-animated-pc-set/Mechan_Keyboard_Normal_DirectX.png", materialName: "Mechan_Keyboard" },
+            { slot: "opacity", path: "gandalf-sax-animated-pc-set/Mechan_Keyboard_Opacity.png", materialName: "Mechan_Keyboard" },
+            { slot: "diffuse", path: "gandalf-sax-animated-pc-set/PC_Mouse_BaseColor.png", materialName: "PC_Mouse" },
+            { slot: "normal", path: "gandalf-sax-animated-pc-set/PC_Mouse_Normal.png", materialName: "PC_Mouse" },
         ],
     },
-    {
+    "mannequin-anatomy-aid-free-download/Mannequin_Animation.FBX": {
         name: "Mannequin (animated)",
-        url: mannequinFbxUrl,
-        format: "fbx",
         textures: [
-            { slot: "diffuse", url: mannequinDiffuseUrl },
-            { slot: "normal", url: mannequinNormalUrl },
+            { slot: "diffuse", path: "mannequin-anatomy-aid-free-download/Diffuse.jpg" },
+            { slot: "normal", path: "mannequin-anatomy-aid-free-download/Normal.jpg" },
         ],
     },
-];
+    "globophobia/Sketchfab.fbx": {
+        name: "Globophobia",
+        pbrMaterialOverrides: [
+            {
+                materialName: "shadow",
+                albedoTextureHasAlpha: true,
+                useAlphaFromAlbedoTexture: true,
+            },
+        ],
+        viewerRotationYDegrees: 90,
+    },
+    "stylised-sky-player-home-dioroma/b63dcd76ee2d4476baf26f7dc48ea3f5.fbx.fbx": {
+        name: "Stylised Sky Player Home Diorama",
+        pbrMaterialOverrides: [
+            {
+                materialName: "wooden skel no op_PBR",
+                transparencyMode: "opaque",
+            },
+            {
+                materialName: "op_branches_PBR",
+                albedoTextureHasAlpha: true,
+                useAlphaFromAlbedoTexture: true,
+                transparencyMode: "alphaTest",
+            },
+        ],
+    },
+    "the-last-stronghold-animated/Floating_Gate_Chinese1.fbx": {
+        name: "The Last Stronghold (animated)",
+    },
+};
+
+const models: ModelEntry[] = buildModelCatalog();
+
+function buildModelCatalog(): ModelEntry[] {
+    return Object.keys(assetUrls)
+        .map((path) => path.replace("../tests/models/", ""))
+        .filter(isModelPath)
+        .sort((a, b) => modelDisplayName(a).localeCompare(modelDisplayName(b)))
+        .map((path) => {
+            const override = modelOverrides[path] ?? {};
+            return {
+                name: override.name ?? modelDisplayName(path),
+                path,
+                url: assetUrl(path),
+                format: inferModelFormat(path),
+                textures: resolveTextureOverrides(override.textures),
+                pbrMaterialOverrides: override.pbrMaterialOverrides,
+                defaultAnimation: override.defaultAnimation,
+                forceOpaque: override.forceOpaque,
+                viewerRotationYDegrees: override.viewerRotationYDegrees,
+            };
+        });
+}
+
+function resolveTextureOverrides(textures: ViewerTextureOverrideSource[] = []): ViewerTextureOverride[] {
+    return textures.flatMap((texture) => {
+        const url = assetUrls[`../tests/models/${texture.path}`];
+        if (!url) {
+            console.warn(`Missing viewer texture override: ${texture.path}`);
+            return [];
+        }
+        return [{
+            slot: texture.slot,
+            url,
+            materialName: texture.materialName,
+            coordinatesIndex: texture.coordinatesIndex,
+            useAlphaFromRGB: texture.useAlphaFromRGB,
+        }];
+    });
+}
+
+function isModelPath(path: string): boolean {
+    const lower = path.toLowerCase();
+    return lower.endsWith(".fbx") || lower.endsWith(".glb");
+}
+
+function inferModelFormat(path: string): "fbx" | "glb" {
+    return path.toLowerCase().endsWith(".glb") ? "glb" : "fbx";
+}
+
+function modelDisplayName(path: string): string {
+    const folder = getDirectoryName(path).split("/").filter(Boolean).pop();
+    const fileName = getFileName(path).replace(/\.(fbx|glb)$/i, "").replace(/\.fbx$/i, "");
+    return toTitleCase(folder || fileName);
+}
+
+function toTitleCase(value: string): string {
+    return value
+        .replace(/[_-]+/g, " ")
+        .replace(/\s+/g, " ")
+        .trim()
+        .replace(/\b\w/g, (match) => match.toUpperCase());
+}
+
+type ViewerPBRTextureSlot =
+    | "albedo"
+    | "normal"
+    | "orm"
+    | "metallic"
+    | "roughness"
+    | "ambientOcclusion"
+    | "emissive"
+    | "opacity"
+    | "height"
+    | "specular"
+    | "gloss"
+    | "unknown";
+
+interface ViewerPBRTextureEntry {
+    path: string;
+    fileName: string;
+    materialKey: string;
+    slot: ViewerPBRTextureSlot;
+    coordinatesIndex?: number;
+}
+
+interface ViewerPBRTextureManifest {
+    fbxPath: string;
+    folder: string;
+    normalization: ViewerNormalizationSettings;
+    textures: ViewerPBRTextureEntry[];
+}
+
+interface ViewerNormalizationSettings {
+    targetDiagonal: number;
+    cameraRadiusMultiplier: number;
+    cameraNearDivisor: number;
+    cameraFarMultiplier: number;
+}
+
+const IMAGE_EXTENSIONS = [".png", ".jpg", ".jpeg", ".webp"];
+const DEFAULT_NORMALIZATION: ViewerNormalizationSettings = {
+    targetDiagonal: 10,
+    cameraRadiusMultiplier: 1.35,
+    cameraNearDivisor: 500,
+    cameraFarMultiplier: 8,
+};
+
+function getAssetRelativePath(url: string): string | undefined {
+    const match = Object.entries(assetUrls).find(([, value]) => value === url);
+    return match?.[0].replace("../tests/models/", "");
+}
+
+function getViewerPBRManifest(model: ModelEntry): ViewerPBRTextureManifest | null {
+    const fbxPath = getAssetRelativePath(model.url);
+    return fbxPath ? viewerPBRManifests[fbxPath] ?? null : null;
+}
+
+function buildViewerPBRManifests(): Record<string, ViewerPBRTextureManifest> {
+    const assetPaths = Object.keys(assetUrls)
+        .map((path) => path.replace("../tests/models/", ""))
+        .sort((a, b) => a.localeCompare(b));
+    const texturePaths = assetPaths.filter(isTexturePath);
+    const manifests: Record<string, ViewerPBRTextureManifest> = {};
+
+    for (const fbxPath of assetPaths.filter(isFBXPath)) {
+        const folder = getDirectoryName(fbxPath);
+        manifests[fbxPath] = {
+            fbxPath,
+            folder,
+            normalization: DEFAULT_NORMALIZATION,
+            textures: texturePaths
+                .filter((path) => getDirectoryName(path) === folder)
+                .map((path) => {
+                    const fileName = getFileName(path);
+                    return {
+                        path,
+                        fileName,
+                        materialKey: inferMaterialKey(fileName),
+                        slot: inferTextureSlot(fileName),
+                    };
+                }),
+        };
+    }
+
+    return manifests;
+}
+
+function getDirectoryName(path: string): string {
+    const index = path.lastIndexOf("/");
+    return index >= 0 ? path.substring(0, index) : "";
+}
+
+function getFileName(path: string): string {
+    const index = path.lastIndexOf("/");
+    return index >= 0 ? path.substring(index + 1) : path;
+}
+
+function isTexturePath(path: string): boolean {
+    const lower = path.toLowerCase();
+    return IMAGE_EXTENSIONS.some((extension) => lower.endsWith(extension));
+}
+
+function isFBXPath(path: string): boolean {
+    return path.toLowerCase().endsWith(".fbx");
+}
+
+function inferTextureSlot(fileName: string): ViewerPBRTextureSlot {
+    const normalized = normalizeTextureName(fileName);
+
+    if (/(^|[_\-\s])(opacity|alpha|opc|mask|coatmsk|flakesmask|op)($|[_\-\s])/.test(normalized)) return "opacity";
+    if (/(^|[_\-\s])(emissive|emission|emit|glow|e)($|[_\-\s])/.test(normalized)) return "emissive";
+    if (/(^|[_\-\s])(normal|norm|nrm|bump|bntn|nom|n)($|[_\-\s])/.test(normalized)) return "normal";
+    if (/(^|[_\-\s])(orm|occlusionroughnessmetallic|occlusion_roughness_metallic|occlusion[_\-\s]?roughness[_\-\s]?metallic)($|[_\-\s])/.test(normalized)) return "orm";
+    if (/(^|[_\-\s])(metallic|metalness|metal|met|m)($|[_\-\s])/.test(normalized)) return "metallic";
+    if (/(^|[_\-\s])(roughness|rough|roph|r)($|[_\-\s])/.test(normalized)) return "roughness";
+    if (/(^|[_\-\s])(ao|ambient|ambientocclusion|ambient_occlusion|occlusion|mixed_ao)($|[_\-\s])/.test(normalized)) return "ambientOcclusion";
+    if (/(^|[_\-\s])(height|disp|displacement)($|[_\-\s])/.test(normalized)) return "height";
+    if (/(^|[_\-\s])(specular|spec)($|[_\-\s])/.test(normalized)) return "specular";
+    if (/(^|[_\-\s])(gloss|glossiness)($|[_\-\s])/.test(normalized)) return "gloss";
+    if (/(^|[_\-\s])(albedo|basecolor|base_color|base|diffuse|diff|dif|defuse|color|colour|bc|d|tex|texture|rgb)($|[_\-\s])/.test(normalized)) return "albedo";
+
+    return "unknown";
+}
+
+function inferMaterialKey(fileName: string): string {
+    let name = normalizeTextureName(fileName);
+    name = name
+        .replace(/([_\-\s])?(base[_\-\s]?color|basecolor|albedo|diffuse|defuse|diff|dif|color|colour|bc|tex|texture|rgb)([_\-\s]?v\d+)?$/i, "")
+        .replace(/([_\-\s])?(normal[_\-\s]?(opengl|directx)?|norm|nrm|bump|bntn|nom|n)$/i, "")
+        .replace(/([_\-\s])?(orm|occlusion[_\-\s]?roughness[_\-\s]?metallic)$/i, "")
+        .replace(/([_\-\s])?(metallic|metalness|metal|met|m)$/i, "")
+        .replace(/([_\-\s])?(roughness|rough|roph|r)$/i, "")
+        .replace(/([_\-\s])?(ambient[_\-\s]?occlusion|mixed[_\-\s]?ao|occlusion|ambient|ao)$/i, "")
+        .replace(/([_\-\s])?(opacity|alpha|opc|mask|coatmsk|flakesmask|op)$/i, "")
+        .replace(/([_\-\s])?(emissive|emission|emit|glow|e)$/i, "")
+        .replace(/([_\-\s])?(height|disp|displacement)$/i, "")
+        .replace(/([_\-\s])?(specular|spec|gloss|glossiness)$/i, "")
+        .replace(/([_\-\s])+$/g, "");
+
+    return normalizeMaterialName(name) || "default";
+}
+
+function normalizeTextureName(fileName: string): string {
+    return fileName
+        .replace(/\.(tga\.)?(png|jpe?g|webp)$/i, "")
+        .replace(/\.\d+$/g, "")
+        .toLowerCase();
+}
+
+function normalizeMaterialName(name: string): string {
+    return name
+        .replace(/\x00.*$/g, "")
+        .replace(/[^a-z0-9]+/gi, "_")
+        .replace(/^_+|_+$/g, "")
+        .toLowerCase();
+}
+
+const viewerPBRManifests = buildViewerPBRManifests();
+
+interface ViewerAssetFrame {
+    center: Vector3;
+    size: number;
+    scale: number;
+    camera: {
+        radius: number;
+        minZ: number;
+        maxZ: number;
+    };
+}
 
 const status = document.getElementById("status")!;
 
@@ -227,15 +494,25 @@ async function main() {
     camera = new ArcRotateCamera("camera", 5.42, 1.12, 30, Vector3.Zero(), scene);
     camera.attachControl(canvas, true);
     camera.wheelPrecision = 10;
+    camera.lowerRadiusLimit = 1.0;
 
-    // Lights
-    const light = new HemisphericLight("light", new Vector3(0, 1, 0.5), scene);
-    light.intensity = 1.0;
-    const fillLight = new HemisphericLight("fillLight", new Vector3(0, -1, -0.5), scene);
-    fillLight.intensity = 0.6;
+    scene.environmentTexture = CubeTexture.CreateFromPrefilteredData(studioEnvironmentUrl, scene);
+    scene.environmentIntensity = 1.0;
 
-    buildGUI();
-    await loadModel(0);
+    const lightElevation = 40 * Math.PI / 180;
+    const lightAzimuth = 2.105 + Math.PI / 2;
+    const lightPosition = new Vector3(
+        Math.cos(lightAzimuth) * Math.cos(lightElevation),
+        Math.sin(lightElevation),
+        Math.sin(lightAzimuth) * Math.cos(lightElevation)
+    ).scale(20);
+    const keyLight = new DirectionalLight("keyLight", lightPosition.scale(-1).normalize(), scene);
+    keyLight.position = lightPosition;
+    keyLight.intensity = 2.5;
+
+    const initialModelIndex = getInitialModelIndex();
+    buildGUI(initialModelIndex);
+    await loadModel(initialModelIndex);
 
     // Show inspector by default
     await import("@babylonjs/core/Debug/debugLayer.js");
@@ -249,7 +526,7 @@ async function main() {
     (window as any).__scene = scene;
 }
 
-function buildGUI() {
+function buildGUI(initialModelIndex: number) {
     const gui = document.getElementById("gui")!;
     gui.innerHTML = "";
 
@@ -262,8 +539,10 @@ function buildGUI() {
         opt.textContent = models[i].name;
         select.appendChild(opt);
     }
+    select.value = String(initialModelIndex);
     select.addEventListener("change", () => {
         const idx = parseInt(select.value);
+        setStartupModel(models[idx]);
         loadModel(idx);
     });
     gui.appendChild(select);
@@ -308,13 +587,60 @@ function buildGUI() {
     gui.appendChild(animBtn);
 }
 
+function getInitialModelIndex(): number {
+    const requestedModel = new URLSearchParams(window.location.search).get(MODEL_QUERY_PARAM);
+    return findModelIndex(requestedModel) ?? findModelIndex(DEFAULT_MODEL_PATH) ?? 0;
+}
+
+function findModelIndex(modelLocator: string | null | undefined): number | undefined {
+    if (!modelLocator) return undefined;
+
+    const normalizedLocator = normalizeModelLocator(modelLocator);
+    if (!normalizedLocator) return undefined;
+
+    const exactIndex = models.findIndex((model) =>
+        normalizeModelLocator(model.path) === normalizedLocator ||
+        normalizeModelLocator(model.name) === normalizedLocator
+    );
+    if (exactIndex >= 0) return exactIndex;
+
+    const locatorTokens = normalizedLocator.split(" ").filter(Boolean);
+    if (locatorTokens.length === 0) return undefined;
+
+    const partialIndex = models.findIndex((model) => {
+        const searchable = normalizeModelLocator(`${model.path} ${model.name} ${model.format}`);
+        return locatorTokens.every((token) => searchable.includes(token));
+    });
+
+    return partialIndex >= 0 ? partialIndex : undefined;
+}
+
+function normalizeModelLocator(value: string): string {
+    return value
+        .replace(/\.(fbx|glb)$/i, "")
+        .replace(/[^a-z0-9]+/gi, " ")
+        .trim()
+        .toLowerCase();
+}
+
+function setStartupModel(model: ModelEntry) {
+    const url = new URL(window.location.href);
+    url.searchParams.set(MODEL_QUERY_PARAM, model.path);
+    window.history.replaceState(null, "", url);
+}
+
 function disposeCurrentModel() {
     if (!currentResult) return;
 
     for (const ag of currentResult.animationGroups) ag.dispose();
-    for (const sk of currentResult.skeletons) sk.dispose();
     for (const m of currentResult.meshes) m.dispose();
     for (const tn of currentResult.transformNodes) tn.dispose();
+    for (const sk of currentResult.skeletons) sk.dispose();
+
+    const multiMaterialsToDispose = [...scene.multiMaterials];
+    for (const mat of multiMaterialsToDispose) {
+        mat.dispose();
+    }
 
     // Dispose all materials and their textures
     const materialsToDispose = [...scene.materials];
@@ -333,19 +659,844 @@ function disposeCurrentModel() {
     // Dispose any remaining textures (from GLB/PBR materials)
     const texturesToDispose = [...scene.textures];
     for (const tex of texturesToDispose) {
+        if (tex === scene.environmentTexture || tex.name.startsWith("data:EnvironmentBRDFTexture")) {
+            continue;
+        }
         tex.dispose();
     }
 
     currentResult = null;
 }
 
+function applyViewerPBRMaterials(
+    result: ISceneLoaderAsyncResult,
+    manifest: ViewerPBRTextureManifest | null,
+    forceOpaque: boolean
+): number {
+    const convertedMaterials = new Map<unknown, unknown>();
+    const allowGlobalTextureFallback = countLeafMaterials(result) <= 1;
+    let assignedTextureCount = 0;
+
+    const convertMaterial = (material: unknown): unknown => {
+        if (!material) return null;
+
+        const existing = convertedMaterials.get(material);
+        if (existing) return existing;
+
+        if (material instanceof MultiMaterial) {
+            const multiMaterial = new MultiMaterial(`${material.name}_PBR`, scene);
+            convertedMaterials.set(material, multiMaterial);
+            multiMaterial.subMaterials = material.subMaterials.map((subMaterial) =>
+                convertMaterial(subMaterial) as PBRMaterial | null
+            );
+            return multiMaterial;
+        }
+
+        if (material instanceof PBRMaterial) {
+            convertedMaterials.set(material, material);
+            return material;
+        }
+
+        const textureEntries = manifest
+            ? selectTextureEntriesForMaterial(materialName(material), manifest, material, allowGlobalTextureFallback)
+            : [];
+        const conversion = createViewerPBRMaterial(material, textureEntries, forceOpaque);
+        assignedTextureCount += conversion.textureCount;
+        convertedMaterials.set(material, conversion.material);
+        return conversion.material;
+    };
+
+    for (const mesh of result.meshes) {
+        if (!mesh.material) continue;
+        mesh.material = convertMaterial(mesh.material) as typeof mesh.material;
+    }
+
+    return assignedTextureCount;
+}
+
+function countLeafMaterials(result: ISceneLoaderAsyncResult): number {
+    const materials = new Set<unknown>();
+    for (const mesh of result.meshes) {
+        collectLeafMaterials(mesh.material, materials);
+    }
+    return materials.size;
+}
+
+function collectLeafMaterials(material: unknown, materials: Set<unknown>) {
+    if (!material) return;
+    if (material instanceof MultiMaterial) {
+        for (const subMaterial of material.subMaterials) {
+            collectLeafMaterials(subMaterial, materials);
+        }
+        return;
+    }
+    materials.add(material);
+}
+
+function createViewerPBRMaterial(
+    sourceMaterial: unknown,
+    textureEntries: ViewerPBRTextureEntry[],
+    forceOpaque: boolean
+): { material: PBRMaterial; textureCount: number } {
+    const pbrMaterial = new PBRMaterial(`${materialName(sourceMaterial) || "material"}_PBR`, scene);
+    pbrMaterial.metallic = 0;
+    pbrMaterial.roughness = 0.6;
+    let textureCount = 0;
+
+    if (sourceMaterial instanceof StandardMaterial) {
+        pbrMaterial.albedoColor = sourceMaterial.diffuseColor.clone();
+        pbrMaterial.emissiveColor = sourceMaterial.emissiveColor.clone();
+        pbrMaterial.alpha = sourceMaterial.alpha;
+        pbrMaterial.backFaceCulling = sourceMaterial.backFaceCulling;
+        textureCount += copyStandardMaterialTexturesToPBR(sourceMaterial, pbrMaterial, forceOpaque);
+        if (!forceOpaque && standardMaterialHasAlpha(sourceMaterial)) {
+            pbrMaterial.needDepthPrePass = true;
+            pbrMaterial.useAlphaFromAlbedoTexture = Boolean(sourceMaterial.diffuseTexture?.hasAlpha);
+            if (sourceMaterial.alpha < 1 || sourceMaterial.needAlphaBlending()) {
+                pbrMaterial.transparencyMode = PBRMaterial.PBRMATERIAL_ALPHABLEND;
+            }
+        }
+    } else {
+        pbrMaterial.albedoColor = new Color3(1, 1, 1);
+    }
+
+    for (const entry of textureEntries) {
+        const texture = createViewerPBRTexture(entry);
+
+        switch (entry.slot) {
+            case "albedo":
+                pbrMaterial.albedoTexture?.dispose();
+                pbrMaterial.albedoTexture = texture;
+                pbrMaterial.albedoColor = new Color3(1, 1, 1);
+                textureCount++;
+                break;
+            case "normal":
+                pbrMaterial.bumpTexture?.dispose();
+                pbrMaterial.bumpTexture = texture;
+                textureCount++;
+                break;
+            case "orm":
+                pbrMaterial.metallicTexture?.dispose();
+                pbrMaterial.metallicTexture = texture;
+                pbrMaterial.metallic = 1;
+                pbrMaterial.roughness = 1;
+                pbrMaterial.useAmbientOcclusionFromMetallicTextureRed = true;
+                pbrMaterial.useRoughnessFromMetallicTextureAlpha = false;
+                pbrMaterial.useRoughnessFromMetallicTextureGreen = true;
+                pbrMaterial.useMetallnessFromMetallicTextureBlue = true;
+                textureCount++;
+                break;
+            case "metallic":
+                pbrMaterial.metallicTexture?.dispose();
+                pbrMaterial.metallicTexture = texture;
+                pbrMaterial.metallic = 1;
+                pbrMaterial.useAmbientOcclusionFromMetallicTextureRed = false;
+                pbrMaterial.useRoughnessFromMetallicTextureAlpha = false;
+                pbrMaterial.useRoughnessFromMetallicTextureGreen = false;
+                pbrMaterial.useMetallnessFromMetallicTextureBlue = true;
+                textureCount++;
+                break;
+            case "roughness":
+                pbrMaterial.microSurfaceTexture?.dispose();
+                pbrMaterial.microSurfaceTexture = texture;
+                pbrMaterial.roughness = 1;
+                textureCount++;
+                break;
+            case "ambientOcclusion":
+                pbrMaterial.ambientTexture?.dispose();
+                pbrMaterial.ambientTexture = texture;
+                pbrMaterial.ambientTextureStrength = 1;
+                textureCount++;
+                break;
+            case "emissive":
+                pbrMaterial.emissiveTexture?.dispose();
+                pbrMaterial.emissiveTexture = texture;
+                pbrMaterial.emissiveColor = new Color3(1, 1, 1);
+                textureCount++;
+                break;
+            case "opacity":
+                if (forceOpaque) {
+                    texture.dispose();
+                    break;
+                }
+                pbrMaterial.opacityTexture?.dispose();
+                pbrMaterial.opacityTexture = configureOpacityTexture(texture, entry.fileName);
+                pbrMaterial.transparencyMode = PBRMaterial.PBRMATERIAL_ALPHABLEND;
+                pbrMaterial.needDepthPrePass = true;
+                textureCount++;
+                break;
+            case "height":
+                if (pbrMaterial.bumpTexture) {
+                    texture.dispose();
+                    break;
+                }
+                pbrMaterial.bumpTexture = texture;
+                textureCount++;
+                break;
+            case "specular":
+                pbrMaterial.reflectivityTexture?.dispose();
+                pbrMaterial.reflectivityTexture = texture;
+                textureCount++;
+                break;
+            case "gloss":
+                pbrMaterial.microSurfaceTexture?.dispose();
+                pbrMaterial.microSurfaceTexture = texture;
+                textureCount++;
+                break;
+            case "unknown":
+                texture.dispose();
+                break;
+        }
+    }
+
+    if (forceOpaque) {
+        pbrMaterial.transparencyMode = PBRMaterial.PBRMATERIAL_OPAQUE;
+        pbrMaterial.alpha = 1;
+        pbrMaterial.opacityTexture = null;
+        pbrMaterial.needDepthPrePass = false;
+    }
+
+    return { material: pbrMaterial, textureCount };
+}
+
+function copyStandardMaterialTexturesToPBR(
+    sourceMaterial: StandardMaterial,
+    pbrMaterial: PBRMaterial,
+    forceOpaque: boolean
+): number {
+    let textureCount = 0;
+
+    if (sourceMaterial.diffuseTexture) {
+        pbrMaterial.albedoTexture = sourceMaterial.diffuseTexture;
+        pbrMaterial.albedoColor = new Color3(1, 1, 1);
+        textureCount++;
+    }
+
+    if (sourceMaterial.bumpTexture) {
+        pbrMaterial.bumpTexture = sourceMaterial.bumpTexture;
+        textureCount++;
+    }
+
+    if (sourceMaterial.emissiveTexture) {
+        pbrMaterial.emissiveTexture = sourceMaterial.emissiveTexture;
+        pbrMaterial.emissiveColor = new Color3(1, 1, 1);
+        textureCount++;
+    }
+
+    if (sourceMaterial.ambientTexture) {
+        pbrMaterial.ambientTexture = sourceMaterial.ambientTexture;
+        pbrMaterial.ambientTextureStrength = 1;
+        textureCount++;
+    }
+
+    if (sourceMaterial.specularTexture) {
+        pbrMaterial.reflectivityTexture = sourceMaterial.specularTexture;
+        textureCount++;
+    }
+
+    if (!forceOpaque && sourceMaterial.opacityTexture) {
+        pbrMaterial.opacityTexture = configureOpacityTexture(sourceMaterial.opacityTexture);
+        pbrMaterial.transparencyMode = PBRMaterial.PBRMATERIAL_ALPHABLEND;
+        pbrMaterial.needDepthPrePass = true;
+        textureCount++;
+    }
+
+    return textureCount;
+}
+
+function standardMaterialHasAlpha(material: StandardMaterial): boolean {
+    return material.alpha < 1 ||
+        Boolean(material.opacityTexture) ||
+        Boolean(material.diffuseTexture?.hasAlpha) ||
+        material.needAlphaBlending() ||
+        material.needAlphaTesting();
+}
+
+function createViewerPBRTexture(entry: ViewerPBRTextureEntry): Texture {
+    const texture = new Texture(assetUrl(entry.path), scene);
+    texture.name = entry.fileName;
+    texture.gammaSpace = entry.slot === "albedo" || entry.slot === "emissive";
+    if (entry.coordinatesIndex !== undefined) {
+        texture.coordinatesIndex = entry.coordinatesIndex;
+    }
+    if (entry.slot === "opacity") {
+        configureOpacityTexture(texture, entry.fileName);
+    }
+    return texture;
+}
+
+function configureOpacityTexture<T extends BaseTexture>(texture: T, sourceName = texture.name): T {
+    texture.hasAlpha = true;
+    texture.getAlphaFromRGB = isJpegTexturePath(sourceName);
+    return texture;
+}
+
+function isJpegTexturePath(path: string): boolean {
+    return /\.(jpe?g)(?:$|[?#])/i.test(path);
+}
+
+function selectTextureEntriesForMaterial(
+    materialNameValue: string,
+    manifest: ViewerPBRTextureManifest,
+    sourceMaterial?: unknown,
+    allowGlobalTextureFallback = false
+): ViewerPBRTextureEntry[] {
+    const supportedTextures = manifest.textures.filter((entry) => entry.slot !== "unknown");
+    const sourceTextureMatches = sourceMaterial
+        ? getSourceMaterialTextureEntries(sourceMaterial, manifest)
+        : [];
+    if (sourceTextureMatches.length > 0) {
+        return chooseOneTexturePerSlot(getSiblingTextureEntries(sourceTextureMatches, manifest));
+    }
+
+    if (supportedTextures.length === 0) return [];
+
+    const normalizedMaterialName = normalizeMaterialName(materialNameValue);
+    const exactMatches = normalizedMaterialName
+        ? supportedTextures.filter((entry) =>
+            normalizedMaterialName === entry.materialKey ||
+            normalizedMaterialName.includes(entry.materialKey) ||
+            entry.materialKey.includes(normalizedMaterialName)
+        )
+        : [];
+
+    if (exactMatches.length > 0) {
+        return chooseOneTexturePerSlot(exactMatches);
+    }
+
+    const materialKeys = new Set(supportedTextures.map((entry) => entry.materialKey));
+    if (allowGlobalTextureFallback && materialKeys.size === 1 && supportedTextures.length === manifest.textures.length) {
+        return chooseOneTexturePerSlot(supportedTextures);
+    }
+
+    const sharedMaterialKey = [...materialKeys]
+        .sort((a, b) => a.length - b.length)
+        .find((key) =>
+            key !== "default" &&
+            key.length >= 4 &&
+            [...materialKeys].every((otherKey) => otherKey === key || otherKey.includes(key))
+        );
+    if (allowGlobalTextureFallback && sharedMaterialKey) {
+        return chooseOneTexturePerSlot(
+            supportedTextures.filter((entry) => entry.materialKey.includes(sharedMaterialKey))
+        );
+    }
+
+    return [];
+}
+
+function getSourceMaterialTextureEntries(
+    sourceMaterial: unknown,
+    manifest: ViewerPBRTextureManifest
+): ViewerPBRTextureEntry[] {
+    if (!(sourceMaterial instanceof StandardMaterial)) return [];
+
+    const sourceTextures: { texture: { name: string; coordinatesIndex?: number } | null; slot: ViewerPBRTextureSlot }[] = [
+        { texture: sourceMaterial.diffuseTexture, slot: "albedo" },
+        { texture: sourceMaterial.bumpTexture, slot: "normal" },
+        { texture: sourceMaterial.emissiveTexture, slot: "emissive" },
+        { texture: sourceMaterial.ambientTexture, slot: "ambientOcclusion" },
+        { texture: sourceMaterial.specularTexture, slot: "specular" },
+    ];
+    if (sourceMaterial.opacityTexture) {
+        sourceTextures.push({ texture: sourceMaterial.opacityTexture, slot: "opacity" });
+    }
+
+    return sourceTextures
+        .map(({ texture, slot }) => texture ? matchManifestTextureFromSource(texture, slot, manifest) : null)
+        .filter((entry): entry is ViewerPBRTextureEntry => Boolean(entry));
+}
+
+function matchManifestTextureFromSource(
+    texture: { name: string; coordinatesIndex?: number },
+    slot: ViewerPBRTextureSlot,
+    manifest: ViewerPBRTextureManifest
+): ViewerPBRTextureEntry | null {
+    const sourceNames = getTextureSourceNames(texture);
+    const matches = manifest.textures.filter((entry) =>
+        sourceNames.some((sourceName) => textureNamesMatch(sourceName, entry.fileName))
+    );
+    const slotMatches = matches.filter((entry) => entry.slot === slot);
+    const [bestMatch] = (slotMatches.length > 0 ? slotMatches : matches).sort(compareTexturePreference);
+    if (!bestMatch) return null;
+    return {
+        ...bestMatch,
+        slot: bestMatch.slot === "unknown" ? slot : bestMatch.slot,
+        coordinatesIndex: texture.coordinatesIndex,
+    };
+}
+
+function getTextureSourceNames(texture: { name: string }): string[] {
+    const names = new Set<string>();
+    for (const value of [
+        texture.name,
+        "url" in texture && typeof texture.url === "string" ? texture.url : "",
+    ]) {
+        if (!value) continue;
+        names.add(getFileName(value.replace(/\\/g, "/")));
+    }
+    return [...names];
+}
+
+function textureNamesMatch(sourceName: string, manifestFileName: string): boolean {
+    const source = normalizeComparableTextureName(sourceName);
+    const manifest = normalizeComparableTextureName(manifestFileName);
+    return Boolean(source) && (
+        source === manifest ||
+        source.includes(manifest) ||
+        manifest.includes(source)
+    );
+}
+
+function normalizeComparableTextureName(fileName: string): string {
+    return normalizeTextureName(fileName)
+        .replace(/[^a-z0-9]+/g, "");
+}
+
+function getSiblingTextureEntries(
+    sourceMatches: ViewerPBRTextureEntry[],
+    manifest: ViewerPBRTextureManifest
+): ViewerPBRTextureEntry[] {
+    const sourceByPath = new Map<string, ViewerPBRTextureEntry>();
+    for (const entry of sourceMatches) {
+        if (!sourceByPath.has(entry.path)) {
+            sourceByPath.set(entry.path, entry);
+        }
+    }
+    const sourceKeys = new Set(sourceMatches.map((entry) => entry.materialKey));
+    const entries = manifest.textures
+        .filter((entry) =>
+            sourceByPath.has(entry.path) ||
+            (entry.slot !== "unknown" && materialKeyMatchesAny(entry.materialKey, sourceKeys))
+        )
+        .map((entry) => {
+            const sourceEntry = sourceByPath.get(entry.path);
+            if (sourceEntry) return sourceEntry;
+
+            const sourceCoordinatesIndex = sourceMatches.find((sourceMatch) =>
+                sourceMatch.coordinatesIndex !== undefined &&
+                materialKeyMatchesAny(entry.materialKey, new Set([sourceMatch.materialKey]))
+            )?.coordinatesIndex;
+            return sourceCoordinatesIndex !== undefined
+                ? { ...entry, coordinatesIndex: sourceCoordinatesIndex }
+                : entry;
+        });
+    return entries;
+}
+
+function materialKeyMatchesAny(materialKey: string, sourceKeys: Set<string>): boolean {
+    for (const sourceKey of sourceKeys) {
+        if (sourceKey === "default") {
+            if (materialKey === sourceKey) return true;
+            continue;
+        }
+        if (
+            materialKey === sourceKey ||
+            materialKey.includes(sourceKey) ||
+            sourceKey.includes(materialKey)
+        ) {
+            return true;
+        }
+    }
+    return false;
+}
+
+function chooseOneTexturePerSlot(entries: ViewerPBRTextureEntry[]): ViewerPBRTextureEntry[] {
+    const preferredSlotOrder: ViewerPBRTextureSlot[] = [
+        "albedo",
+        "normal",
+        "orm",
+        "metallic",
+        "roughness",
+        "ambientOcclusion",
+        "emissive",
+        "opacity",
+        "height",
+        "specular",
+        "gloss",
+    ];
+    const selected = new Map<ViewerPBRTextureSlot, ViewerPBRTextureEntry>();
+
+    for (const entry of [...entries].sort(compareTexturePreference)) {
+        if (!selected.has(entry.slot)) {
+            selected.set(entry.slot, entry);
+        }
+    }
+    if (
+        selected.has("orm") &&
+        (selected.has("metallic") || selected.has("roughness") || selected.has("ambientOcclusion"))
+    ) {
+        selected.delete("orm");
+    }
+
+    return preferredSlotOrder
+        .map((slot) => selected.get(slot))
+        .filter((entry): entry is ViewerPBRTextureEntry => Boolean(entry));
+}
+
+function compareTexturePreference(a: ViewerPBRTextureEntry, b: ViewerPBRTextureEntry): number {
+    const aScore = texturePreferenceScore(a);
+    const bScore = texturePreferenceScore(b);
+    return bScore - aScore || a.fileName.localeCompare(b.fileName);
+}
+
+function texturePreferenceScore(entry: ViewerPBRTextureEntry): number {
+    const normalized = normalizeTextureName(entry.fileName);
+    let score = 1;
+    if (!/(^|[_\-\s])v\d+($|[_\-\s])/.test(normalized)) {
+        score = 2;
+    }
+    if (/(^|[_\-\s])v2($|[_\-\s])/.test(normalized)) {
+        score = 3;
+    }
+    if (entry.slot === "ambientOcclusion" && /(^|[_\-\s])mixed[_\-\s]?ao($|[_\-\s])/.test(normalized)) {
+        score += 4;
+    }
+    return score;
+}
+
+function materialName(material: unknown): string {
+    return typeof material === "object" &&
+        material !== null &&
+        "name" in material &&
+        typeof material.name === "string"
+        ? material.name
+        : "";
+}
+
+function normalizeLoadedAsset(
+    result: ISceneLoaderAsyncResult,
+    manifest: ViewerPBRTextureManifest | null,
+    viewerRotationYDegrees = 0
+): ViewerAssetFrame {
+    const settings = manifest?.normalization ?? DEFAULT_NORMALIZATION;
+    const originalExtents = getLoadedMeshExtents(result);
+    const originalCenter = originalExtents
+        ? originalExtents.min.add(originalExtents.max).scale(0.5)
+        : Vector3.Zero();
+    const originalSize = originalExtents
+        ? originalExtents.max.subtract(originalExtents.min).length()
+        : settings.targetDiagonal;
+
+    let scale = 1;
+    if (Number.isFinite(originalSize) && originalSize > 0) {
+        scale = settings.targetDiagonal / originalSize;
+    }
+
+    const viewerRoot = new TransformNode("viewerNormalizedRoot", scene);
+    const viewerRotationY = viewerRotationYDegrees * Math.PI / 180;
+    viewerRoot.scaling = new Vector3(scale, scale, scale);
+    viewerRoot.rotation.y = viewerRotationY;
+    viewerRoot.position = Vector3.TransformCoordinates(
+        originalCenter.scale(scale),
+        Matrix.RotationYawPitchRoll(viewerRotationY, 0, 0)
+    ).scale(-1);
+
+    const loadedNodes = new Set<unknown>([...result.meshes, ...result.transformNodes]);
+    for (const transformNode of result.transformNodes) {
+        if (isAttachedToBone(transformNode)) continue;
+        if (!transformNode.parent || !loadedNodes.has(transformNode.parent)) {
+            transformNode.parent = viewerRoot;
+        }
+    }
+    for (const mesh of result.meshes) {
+        if (isAttachedToBone(mesh)) continue;
+        if (!mesh.parent || !loadedNodes.has(mesh.parent)) {
+            mesh.parent = viewerRoot;
+        }
+    }
+
+    result.transformNodes.push(viewerRoot);
+
+    const normalizedExtents = getLoadedMeshExtents(result);
+    const center = normalizedExtents
+        ? normalizedExtents.min.add(normalizedExtents.max).scale(0.5)
+        : Vector3.Zero();
+    const size = normalizedExtents
+        ? normalizedExtents.max.subtract(normalizedExtents.min).length()
+        : settings.targetDiagonal;
+    const safeSize = Number.isFinite(size) && size > 0 ? size : settings.targetDiagonal;
+    const radius = safeSize * settings.cameraRadiusMultiplier;
+
+    return {
+        center,
+        size: safeSize,
+        scale,
+        camera: {
+            radius,
+            minZ: Math.max(safeSize / settings.cameraNearDivisor, 0.01),
+            maxZ: Math.max(safeSize * settings.cameraFarMultiplier, radius + safeSize),
+        },
+    };
+}
+
+function getLoadedMeshExtents(result: ISceneLoaderAsyncResult): { min: Vector3; max: Vector3 } | null {
+    let min: Vector3 | null = null;
+    let max: Vector3 | null = null;
+
+    for (const mesh of result.meshes) {
+        if (mesh.isDisposed()) continue;
+
+        const extents = getMeshFiniteWorldExtents(mesh);
+        if (!extents) continue;
+
+        if (!min || !max) {
+            min = extents.min.clone();
+            max = extents.max.clone();
+            continue;
+        }
+
+        min.x = Math.min(min.x, extents.min.x);
+        min.y = Math.min(min.y, extents.min.y);
+        min.z = Math.min(min.z, extents.min.z);
+        max.x = Math.max(max.x, extents.max.x);
+        max.y = Math.max(max.y, extents.max.y);
+        max.z = Math.max(max.z, extents.max.z);
+    }
+
+    return min && max ? { min, max } : null;
+}
+
+function getMeshFiniteWorldExtents(mesh: ISceneLoaderAsyncResult["meshes"][number]): { min: Vector3; max: Vector3 } | null {
+    if (mesh.getTotalVertices() === 0) return null;
+
+    mesh.computeWorldMatrix(true);
+
+    const box = mesh.getBoundingInfo().boundingBox;
+    if (isFiniteBounds(box.minimumWorld, box.maximumWorld)) {
+        return { min: box.minimumWorld, max: box.maximumWorld };
+    }
+
+    const positions = mesh.getVerticesData(VertexBuffer.PositionKind);
+    if (!positions || positions.length < 3) return null;
+
+    const world = mesh.getWorldMatrix().m;
+    if (!world.every(Number.isFinite)) return null;
+
+    const min = new Vector3(Number.POSITIVE_INFINITY, Number.POSITIVE_INFINITY, Number.POSITIVE_INFINITY);
+    const max = new Vector3(Number.NEGATIVE_INFINITY, Number.NEGATIVE_INFINITY, Number.NEGATIVE_INFINITY);
+
+    for (let i = 0; i + 2 < positions.length; i += 3) {
+        const x = positions[i];
+        const y = positions[i + 1];
+        const z = positions[i + 2];
+        if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) continue;
+
+        const worldX = x * world[0] + y * world[4] + z * world[8] + world[12];
+        const worldY = x * world[1] + y * world[5] + z * world[9] + world[13];
+        const worldZ = x * world[2] + y * world[6] + z * world[10] + world[14];
+        if (!Number.isFinite(worldX) || !Number.isFinite(worldY) || !Number.isFinite(worldZ)) continue;
+
+        min.x = Math.min(min.x, worldX);
+        min.y = Math.min(min.y, worldY);
+        min.z = Math.min(min.z, worldZ);
+        max.x = Math.max(max.x, worldX);
+        max.y = Math.max(max.y, worldY);
+        max.z = Math.max(max.z, worldZ);
+    }
+
+    return isFiniteBounds(min, max) ? { min, max } : null;
+}
+
+function isFiniteBounds(min: Vector3, max: Vector3): boolean {
+    return Number.isFinite(min.x) &&
+        Number.isFinite(min.y) &&
+        Number.isFinite(min.z) &&
+        Number.isFinite(max.x) &&
+        Number.isFinite(max.y) &&
+        Number.isFinite(max.z) &&
+        min.x <= max.x &&
+        min.y <= max.y &&
+        min.z <= max.z;
+}
+
+function isAttachedToBone(node: unknown): boolean {
+    return typeof node === "object" &&
+        node !== null &&
+        "_transformToBoneReferal" in node &&
+        Boolean((node as { _transformToBoneReferal?: unknown })._transformToBoneReferal);
+}
+
+interface ViewerFeatureStats {
+    uvSetCount: number;
+    hasVertexColors: boolean;
+    morphTargetCount: number;
+    multiMaterialCount: number;
+    alphaMaterialCount: number;
+}
+
+const UV_BUFFER_KINDS = [
+    VertexBuffer.UVKind,
+    VertexBuffer.UV2Kind,
+    VertexBuffer.UV3Kind,
+    VertexBuffer.UV4Kind,
+    VertexBuffer.UV5Kind,
+    VertexBuffer.UV6Kind,
+];
+
+function getViewerFeatureStats(result: ISceneLoaderAsyncResult): ViewerFeatureStats {
+    let uvSetCount = 0;
+    let hasVertexColors = false;
+    let morphTargetCount = 0;
+    let multiMaterialCount = 0;
+    let alphaMaterialCount = 0;
+    const multiMaterials = new Set<MultiMaterial>();
+    const alphaMaterials = new Set<PBRMaterial | StandardMaterial>();
+
+    for (const mesh of result.meshes) {
+        const meshUVSetCount = UV_BUFFER_KINDS.filter((kind) =>
+            mesh.isVerticesDataPresent(kind)
+        ).length;
+        uvSetCount = Math.max(uvSetCount, meshUVSetCount);
+
+        if (mesh.isVerticesDataPresent(VertexBuffer.ColorKind)) {
+            hasVertexColors = true;
+        }
+
+        if (mesh.morphTargetManager) {
+            morphTargetCount += mesh.morphTargetManager.numTargets;
+        }
+
+        if (mesh.material instanceof MultiMaterial) {
+            multiMaterials.add(mesh.material);
+            for (const subMaterial of mesh.material.subMaterials) {
+                if (subMaterial instanceof PBRMaterial || subMaterial instanceof StandardMaterial) {
+                    if (materialUsesAlpha(subMaterial)) {
+                        alphaMaterials.add(subMaterial);
+                    }
+                }
+            }
+        } else if (mesh.material instanceof PBRMaterial || mesh.material instanceof StandardMaterial) {
+            if (materialUsesAlpha(mesh.material)) {
+                alphaMaterials.add(mesh.material);
+            }
+        }
+    }
+
+    multiMaterialCount = multiMaterials.size;
+    alphaMaterialCount = alphaMaterials.size;
+
+    return {
+        uvSetCount,
+        hasVertexColors,
+        morphTargetCount,
+        multiMaterialCount,
+        alphaMaterialCount,
+    };
+}
+
+function materialUsesAlpha(material: PBRMaterial | StandardMaterial): boolean {
+    return material.alpha < 1 ||
+        Boolean(material.opacityTexture) ||
+        Boolean(material instanceof PBRMaterial && material.useAlphaFromAlbedoTexture && material.albedoTexture) ||
+        Boolean("needDepthPrePass" in material && material.needDepthPrePass) ||
+        material.needAlphaBlending() ||
+        material.needAlphaTesting();
+}
+
+function appendFeatureStats(statusText: string, stats: ViewerFeatureStats): string {
+    if (stats.uvSetCount > 1) statusText += `, ${stats.uvSetCount} UV sets`;
+    if (stats.hasVertexColors) statusText += ", vertex colors";
+    if (stats.morphTargetCount > 0) statusText += `, ${stats.morphTargetCount} morph target(s)`;
+    if (stats.multiMaterialCount > 0) statusText += `, ${stats.multiMaterialCount} multi-material(s)`;
+    if (stats.alphaMaterialCount > 0) statusText += `, ${stats.alphaMaterialCount} alpha material(s)`;
+    return statusText;
+}
+
+function getLoadedAssetTextureCount(
+    result: ISceneLoaderAsyncResult,
+    manifest: ViewerPBRTextureManifest | null,
+    model: ModelEntry
+): number {
+    const textureUrls = new Set<string>();
+    const knownTextureUrls = getKnownAssetTextureUrls(manifest, model);
+    const folder = manifest?.folder;
+
+    for (const texture of scene.textures) {
+        const url = texture.url ?? texture.name;
+        if (isKnownAssetTextureUrl(url, knownTextureUrls, folder)) {
+            textureUrls.add(url);
+        }
+    }
+
+    for (const override of model.textures) {
+        textureUrls.add(override.url);
+    }
+
+    for (const mesh of result.meshes) {
+        collectMaterialTextureUrls(mesh.material, textureUrls, folder, knownTextureUrls);
+    }
+
+    return textureUrls.size;
+}
+
+function getKnownAssetTextureUrls(
+    manifest: ViewerPBRTextureManifest | null,
+    model: ModelEntry
+): Set<string> {
+    const urls = new Set<string>();
+    if (manifest) {
+        for (const entry of manifest.textures) {
+            urls.add(assetUrl(entry.path));
+        }
+    }
+    for (const override of model.textures) {
+        urls.add(override.url);
+    }
+    return urls;
+}
+
+function isKnownAssetTextureUrl(
+    url: string,
+    knownTextureUrls: Set<string>,
+    assetFolder: string | undefined
+): boolean {
+    if (knownTextureUrls.size > 0) {
+        return knownTextureUrls.has(url);
+    }
+    return Boolean(assetFolder && url.includes(`/tests/models/${assetFolder}/`));
+}
+
+function collectMaterialTextureUrls(
+    material: unknown,
+    textureUrls: Set<string>,
+    assetFolder: string | undefined,
+    knownTextureUrls: Set<string>
+) {
+    if (!material) return;
+
+    if (material instanceof MultiMaterial) {
+        for (const subMaterial of material.subMaterials) {
+            collectMaterialTextureUrls(subMaterial, textureUrls, assetFolder, knownTextureUrls);
+        }
+        return;
+    }
+
+    if (!(material instanceof PBRMaterial) && !(material instanceof StandardMaterial)) {
+        return;
+    }
+
+    const textures = material.getActiveTextures();
+    for (const texture of textures) {
+        const url = texture.url ?? texture.name;
+        if (!url) continue;
+        if (isKnownAssetTextureUrl(url, knownTextureUrls, assetFolder)) {
+            textureUrls.add(url);
+        }
+    }
+}
+
 async function loadModel(index: number) {
     const model = models[index];
     status.textContent = `Loading ${model.name}...`;
+    let pbrTextureCount = 0;
+    let assetTextureCount = 0;
 
     disposeCurrentModel();
 
     try {
+        let manifest: ViewerPBRTextureManifest | null = null;
+
         if (model.format === "glb") {
             // Use Babylon's built-in GLTF/GLB loader
             currentResult = await SceneLoader.ImportMeshAsync(
@@ -373,10 +1524,25 @@ async function loadModel(index: number) {
                 rootUrl
             );
 
-            // Replace textures with known Vite-resolved URLs
-            for (const mat of scene.materials) {
-                if (mat instanceof StandardMaterial) {
-                    applyTextures(mat, model.textures);
+            manifest = getViewerPBRManifest(model);
+            pbrTextureCount = applyViewerPBRMaterials(
+                currentResult,
+                manifest,
+                model.forceOpaque ?? false
+            );
+            pbrTextureCount += applyPBRTextureOverrides(
+                model.textures,
+                model.forceOpaque ?? false
+            );
+            applyPBRMaterialOverrides(model.pbrMaterialOverrides ?? [], model.forceOpaque ?? false);
+            assetTextureCount = getLoadedAssetTextureCount(currentResult, manifest, model);
+
+            if (pbrTextureCount === 0) {
+                // Fallback for any hand-authored entries that do not have sibling texture assets.
+                for (const mat of scene.materials) {
+                    if (mat instanceof StandardMaterial) {
+                        applyTextures(mat, model.textures);
+                    }
                 }
             }
 
@@ -392,12 +1558,11 @@ async function loadModel(index: number) {
             }
         }
 
-        // Auto-frame camera — position above looking down at the model
-        const worldExtends = scene.getWorldExtends();
-        const center = worldExtends.min.add(worldExtends.max).scale(0.5);
-        const size = worldExtends.max.subtract(worldExtends.min).length();
-        camera.target = center;
-        camera.radius = size * 1.2;
+        const frame = normalizeLoadedAsset(currentResult, manifest, model.viewerRotationYDegrees);
+        camera.target = frame.center;
+        camera.radius = frame.camera.radius;
+        camera.minZ = frame.camera.minZ;
+        camera.maxZ = frame.camera.maxZ;
         camera.alpha = 2.105;   // ~120° azimuth
         camera.beta = 1.080;    // ~62° elevation (above horizon)
 
@@ -408,7 +1573,8 @@ async function loadModel(index: number) {
         let statusText = `Loaded: ${meshCount} mesh(es)`;
         if (skelCount > 0) statusText += `, ${skelCount} skeleton(s)`;
         if (animCount > 0) statusText += `, ${animCount} animation(s)`;
-        statusText += ". Use mouse to orbit.";
+        if (assetTextureCount > 0) statusText += `, ${assetTextureCount} asset texture(s)`;
+        statusText = appendFeatureStats(statusText, getViewerFeatureStats(currentResult));
         status.textContent = statusText;
 
         // Update animation UI
@@ -449,9 +1615,203 @@ function applyTextures(
                 break;
             case "opacity":
                 mat.opacityTexture?.dispose();
-                mat.opacityTexture = new Texture(tex.url, scene);
+                mat.opacityTexture = configureOpacityTexture(new Texture(tex.url, scene), tex.url);
                 break;
         }
+    }
+}
+
+function applyPBRTextureOverrides(
+    textures: ViewerTextureOverride[],
+    forceOpaque: boolean
+): number {
+    let appliedCount = 0;
+
+    for (const mat of scene.materials) {
+        if (!(mat instanceof PBRMaterial)) continue;
+
+        for (const tex of textures) {
+            if (tex.materialName && !matchesPBRMaterialOverride(mat.name, tex.materialName)) {
+                continue;
+            }
+            if (!tex.materialName && pbrMaterialHasTextureForSlot(mat, tex.slot)) {
+                continue;
+            }
+
+            const texture = createPBRTextureOverride(tex);
+            switch (tex.slot) {
+                case "albedo":
+                case "diffuse":
+                    mat.albedoTexture?.dispose();
+                    mat.albedoTexture = texture;
+                    mat.albedoColor = new Color3(1, 1, 1);
+                    appliedCount++;
+                    break;
+                case "normal":
+                    mat.bumpTexture?.dispose();
+                    mat.bumpTexture = texture;
+                    appliedCount++;
+                    break;
+                case "ambientOcclusion":
+                    mat.ambientTexture?.dispose();
+                    mat.ambientTexture = texture;
+                    mat.ambientTextureStrength = 1;
+                    appliedCount++;
+                    break;
+                case "roughness":
+                    mat.microSurfaceTexture?.dispose();
+                    mat.microSurfaceTexture = texture;
+                    mat.roughness = 1;
+                    appliedCount++;
+                    break;
+                case "metallic":
+                    mat.metallicTexture?.dispose();
+                    mat.metallicTexture = texture;
+                    mat.metallic = 1;
+                    mat.useMetallnessFromMetallicTextureBlue = true;
+                    mat.useRoughnessFromMetallicTextureGreen = false;
+                    mat.useRoughnessFromMetallicTextureAlpha = false;
+                    mat.useAmbientOcclusionFromMetallicTextureRed = false;
+                    appliedCount++;
+                    break;
+                case "emissive":
+                    mat.emissiveTexture?.dispose();
+                    mat.emissiveTexture = texture;
+                    mat.emissiveColor = new Color3(1, 1, 1);
+                    appliedCount++;
+                    break;
+                case "opacity":
+                    if (forceOpaque) {
+                        texture.dispose();
+                        break;
+                    }
+                    mat.opacityTexture?.dispose();
+                    mat.opacityTexture = configureOpacityTexture(texture, tex.url);
+                    if (tex.useAlphaFromRGB) {
+                        mat.opacityTexture.getAlphaFromRGB = true;
+                    }
+                    mat.transparencyMode = PBRMaterial.PBRMATERIAL_ALPHABLEND;
+                    mat.needDepthPrePass = true;
+                    appliedCount++;
+                    break;
+                default:
+                    texture.dispose();
+                    break;
+            }
+        }
+    }
+
+    return appliedCount;
+}
+
+function createPBRTextureOverride(textureOverride: ViewerTextureOverride): Texture {
+    const texture = new Texture(textureOverride.url, scene);
+    texture.name = getFileName(textureOverride.url.replace(/\\/g, "/"));
+    texture.gammaSpace = textureOverride.slot === "diffuse" ||
+        textureOverride.slot === "albedo" ||
+        textureOverride.slot === "emissive";
+    if (textureOverride.coordinatesIndex !== undefined) {
+        texture.coordinatesIndex = textureOverride.coordinatesIndex;
+    }
+    return texture;
+}
+
+function pbrMaterialHasTextureForSlot(material: PBRMaterial, slot: string): boolean {
+    switch (slot) {
+        case "albedo":
+        case "diffuse":
+            return Boolean(material.albedoTexture);
+        case "normal":
+            return Boolean(material.bumpTexture);
+        case "ambientOcclusion":
+            return Boolean(material.ambientTexture);
+        case "roughness":
+            return Boolean(material.microSurfaceTexture);
+        case "metallic":
+            return Boolean(material.metallicTexture);
+        case "emissive":
+            return Boolean(material.emissiveTexture);
+        case "opacity":
+            return Boolean(material.opacityTexture);
+        default:
+            return false;
+    }
+}
+
+function applyPBRMaterialOverrides(
+    overrides: ViewerPBRMaterialOverride[],
+    forceOpaque: boolean
+) {
+    if (overrides.length === 0) return;
+
+    for (const mat of scene.materials) {
+        if (!(mat instanceof PBRMaterial)) continue;
+
+        for (const override of overrides) {
+            if (!matchesPBRMaterialOverride(mat.name, override.materialName)) {
+                continue;
+            }
+
+            if (override.albedoTextureHasAlpha && mat.albedoTexture) {
+                mat.albedoTexture.hasAlpha = true;
+            }
+
+            if (override.metallic !== undefined) {
+                mat.metallic = override.metallic;
+            }
+
+            if (override.roughness !== undefined) {
+                mat.roughness = override.roughness;
+            }
+
+            if (!forceOpaque && override.useAlphaFromAlbedoTexture && mat.albedoTexture) {
+                mat.useAlphaFromAlbedoTexture = true;
+                mat.transparencyMode = PBRMaterial.PBRMATERIAL_ALPHABLEND;
+                mat.needDepthPrePass = true;
+            }
+
+            if (!forceOpaque && override.useAdditiveAlpha) {
+                mat.alphaMode = Engine.ALPHA_ADD;
+                mat.transparencyMode = PBRMaterial.PBRMATERIAL_ALPHABLEND;
+                mat.needDepthPrePass = false;
+            }
+
+            applyPBRTransparencyModeOverride(mat, override.transparencyMode, forceOpaque);
+        }
+    }
+}
+
+function matchesPBRMaterialOverride(pbrMaterialName: string, overrideMaterialName: string): boolean {
+    const normalizedPBRName = normalizePBRMaterialOverrideName(pbrMaterialName);
+    const normalizedOverrideName = normalizePBRMaterialOverrideName(overrideMaterialName);
+    return normalizedPBRName === normalizedOverrideName;
+}
+
+function normalizePBRMaterialOverrideName(name: string): string {
+    return normalizeMaterialName(name.replace(/_pbr$/i, ""));
+}
+
+function applyPBRTransparencyModeOverride(
+    material: PBRMaterial,
+    transparencyMode: ViewerPBRMaterialOverride["transparencyMode"],
+    forceOpaque: boolean
+): void {
+    switch (transparencyMode) {
+        case "opaque":
+            material.transparencyMode = PBRMaterial.PBRMATERIAL_OPAQUE;
+            material.alpha = 1;
+            material.needDepthPrePass = false;
+            break;
+        case "alphaTest":
+            if (forceOpaque) return;
+            material.transparencyMode = PBRMaterial.PBRMATERIAL_ALPHATEST;
+            material.needDepthPrePass = false;
+            break;
+        case "alphaBlend":
+            if (forceOpaque) return;
+            material.transparencyMode = PBRMaterial.PBRMATERIAL_ALPHABLEND;
+            material.needDepthPrePass = true;
+            break;
     }
 }
 

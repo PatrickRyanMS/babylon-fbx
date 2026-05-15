@@ -5,6 +5,9 @@ import { getChildren } from "./connections.js";
 
 /** FBX time units: 46186158000 ticks per second */
 const FBX_TIME_UNIT = 46186158000;
+const KEY_ATTR_DATA_STRIDE = 4;
+
+export type FBXInterpolationType = "constant" | "linear" | "cubic";
 
 /** A single keyframe */
 export interface FBXKeyframe {
@@ -12,6 +15,14 @@ export interface FBXKeyframe {
     time: number;
     /** Value at this keyframe */
     value: number;
+    /** Interpolation used from this key to the next key */
+    interpolation: FBXInterpolationType;
+    /** Constant interpolation variant */
+    constantMode?: "standard" | "next";
+    /** Cubic outgoing slope in value units per second */
+    rightSlope?: number;
+    /** Cubic incoming slope for the next key, in value units per second */
+    nextLeftSlope?: number;
 }
 
 /** An animation curve (one axis of one property) */
@@ -48,6 +59,10 @@ export interface FBXAnimationLayerData {
 export interface FBXAnimationStackData {
     /** Animation name */
     name: string;
+    /** Clip start in seconds after any keyframe rebasing */
+    startTime: number;
+    /** Clip stop in seconds after any keyframe rebasing */
+    stopTime: number;
     /** Duration in seconds */
     duration: number;
     /** Per-bone curve nodes (flattened from all layers for backward compat) */
@@ -78,6 +93,7 @@ function extractAnimStack(
     objectMap: FBXObjectMap
 ): FBXAnimationStackData | null {
     const name = cleanFBXName(getPropertyValue<string>(stackNode, 1) ?? "Animation");
+    const declaredTimeSpan = extractAnimationStackTimeSpan(stackNode);
 
     // Find AnimationLayer children of this stack
     const layerEntries = getChildren(objectMap, stackId, "AnimationLayer");
@@ -140,24 +156,58 @@ function extractAnimStack(
 
     if (allCurveNodes.length === 0) return null;
 
+    const timeOffset = minTime > 0 && isFinite(minTime) ? minTime : 0;
+
     // Rebase all keyframe times so the animation starts at 0
-    if (minTime > 0 && isFinite(minTime)) {
+    if (timeOffset > 0) {
         for (const cn of allCurveNodes) {
             for (const curve of cn.curves) {
                 for (const key of curve.keys) {
-                    key.time -= minTime;
+                    key.time -= timeOffset;
                 }
             }
         }
-        maxTime -= minTime;
+        maxTime -= timeOffset;
     }
+
+    const declaredStart = declaredTimeSpan
+        ? Math.max(declaredTimeSpan.start - timeOffset, 0)
+        : 0;
+    const declaredStop = declaredTimeSpan
+        ? Math.max(declaredTimeSpan.stop - timeOffset, declaredStart)
+        : 0;
+    const hasDeclaredDuration = declaredStop > declaredStart;
+    const startTime = hasDeclaredDuration ? declaredStart : 0;
+    const stopTime = hasDeclaredDuration ? declaredStop : maxTime;
 
     return {
         name,
-        duration: maxTime,
+        startTime,
+        stopTime,
+        duration: Math.max(stopTime - startTime, 0),
         curveNodes: allCurveNodes,
         layers,
     };
+}
+
+function extractAnimationStackTimeSpan(stackNode: FBXNode): { start: number; stop: number } | null {
+    const props70 = findChildByName(stackNode, "Properties70");
+    if (!props70) return null;
+
+    let start = 0;
+    let stop: number | null = null;
+
+    for (const p of props70.children) {
+        if (p.name !== "P") continue;
+        const pName = getPropertyValue<string>(p, 0);
+        if (pName === "LocalStart" || pName === "ReferenceStart") {
+            start = fbxTimeToSeconds(p.properties[4]?.value) ?? start;
+        } else if (pName === "LocalStop" || pName === "ReferenceStop") {
+            stop = fbxTimeToSeconds(p.properties[4]?.value) ?? stop;
+        }
+    }
+
+    return stop !== null ? { start, stop } : null;
 }
 
 function extractCurveNode(
@@ -296,25 +346,101 @@ function extractKeyframes(curveNode: FBXNode): FBXKeyframe[] {
 
     const keyTimes = toInt64Array(keyTimeNode.properties[0]?.value);
     const keyValues = toFloat32Array(keyValueNode.properties[0]?.value);
+    const keyAttrFlags = toInt32Array(findChildByName(curveNode, "KeyAttrFlags")?.properties[0]?.value);
+    const keyAttrData = toFloat32Array(findChildByName(curveNode, "KeyAttrDataFloat")?.properties[0]?.value);
+    const keyAttrRefCount = toInt32Array(findChildByName(curveNode, "KeyAttrRefCount")?.properties[0]?.value);
 
     if (!keyTimes || !keyValues) return [];
     if (keyTimes.length !== keyValues.length) return [];
 
+    const keyAttributeIndices = buildKeyAttributeIndices(
+        keyTimes.length,
+        keyAttrFlags,
+        keyAttrRefCount
+    );
+
     const keys: FBXKeyframe[] = [];
     for (let i = 0; i < keyTimes.length; i++) {
+        const attrIndex = keyAttributeIndices[i];
+        const flag = attrIndex >= 0 ? keyAttrFlags?.[attrIndex] ?? 0 : 0;
+        const dataOffset = attrIndex * KEY_ATTR_DATA_STRIDE;
+
         keys.push({
             time: Number(keyTimes[i]) / FBX_TIME_UNIT,
             value: keyValues[i],
+            interpolation: getInterpolationType(flag),
+            constantMode: (flag & 0x00000100) !== 0 ? "next" : "standard",
+            rightSlope: getFiniteKeyAttrData(keyAttrData, dataOffset),
+            nextLeftSlope: getFiniteKeyAttrData(keyAttrData, dataOffset + 1),
         });
     }
 
     return keys;
 }
 
+export function sampleFBXCurveAtTime(
+    curveData: FBXCurveData | undefined,
+    time: number
+): number | null {
+    if (!curveData || curveData.keys.length === 0) return null;
+
+    const keys = curveData.keys;
+
+    if (time <= keys[0].time) return keys[0].value;
+    if (time >= keys[keys.length - 1].time) return keys[keys.length - 1].value;
+
+    for (let i = 0; i < keys.length - 1; i++) {
+        const key = keys[i];
+        const nextKey = keys[i + 1];
+        if (time < key.time || time > nextKey.time) continue;
+
+        if (nextKey.time === key.time) return key.value;
+        if (key.interpolation === "constant") {
+            return key.constantMode === "next" ? nextKey.value : key.value;
+        }
+
+        const segmentDuration = nextKey.time - key.time;
+        const t = (time - key.time) / segmentDuration;
+
+        if (key.interpolation === "cubic") {
+            const linearSlope = (nextKey.value - key.value) / segmentDuration;
+            const rightSlope = key.rightSlope ?? linearSlope;
+            const nextLeftSlope = key.nextLeftSlope ?? linearSlope;
+            return cubicHermite(
+                key.value,
+                nextKey.value,
+                rightSlope,
+                nextLeftSlope,
+                segmentDuration,
+                t
+            );
+        }
+
+        return key.value + t * (nextKey.value - key.value);
+    }
+
+    return keys[keys.length - 1].value;
+}
+
 // ── Utilities ──────────────────────────────────────────────────────────────────
 
 function toInt64Array(value: unknown): BigInt64Array | null {
     if (value instanceof BigInt64Array) return value;
+    return null;
+}
+
+function toInt32Array(value: unknown): Int32Array | null {
+    if (value instanceof Int32Array) return value;
+    return null;
+}
+
+function fbxTimeToSeconds(value: unknown): number | null {
+    if (typeof value === "bigint") {
+        return Number(value) / FBX_TIME_UNIT;
+    }
+    if (typeof value === "number") {
+        return value / FBX_TIME_UNIT;
+    }
     return null;
 }
 
@@ -326,4 +452,80 @@ function toFloat32Array(value: unknown): Float32Array | null {
         return result;
     }
     return null;
+}
+
+function buildKeyAttributeIndices(
+    keyCount: number,
+    keyAttrFlags: Int32Array | null,
+    keyAttrRefCount: Int32Array | null
+): number[] {
+    if (!keyAttrFlags || keyAttrFlags.length === 0) {
+        return new Array(keyCount).fill(-1);
+    }
+
+    if (keyAttrRefCount && keyAttrRefCount.length > 0) {
+        let total = 0;
+        for (const count of keyAttrRefCount) total += count;
+
+        if (total === keyCount) {
+            const indices: number[] = [];
+            for (let attrIndex = 0; attrIndex < keyAttrRefCount.length; attrIndex++) {
+                const count = keyAttrRefCount[attrIndex];
+                for (let i = 0; i < count; i++) indices.push(attrIndex);
+            }
+            return indices;
+        }
+    }
+
+    if (keyAttrFlags.length === keyCount) {
+        return Array.from({ length: keyCount }, (_, i) => i);
+    }
+
+    if (keyAttrFlags.length === 1) {
+        return new Array(keyCount).fill(0);
+    }
+
+    return Array.from(
+        { length: keyCount },
+        (_, i) => Math.min(i, keyAttrFlags.length - 1)
+    );
+}
+
+function getInterpolationType(flag: number): FBXInterpolationType {
+    if ((flag & 0x00000008) !== 0) return "cubic";
+    if ((flag & 0x00000004) !== 0) return "linear";
+    if ((flag & 0x00000002) !== 0) return "constant";
+    return "linear";
+}
+
+function getFiniteKeyAttrData(
+    keyAttrData: Float32Array | null,
+    index: number
+): number | undefined {
+    if (!keyAttrData || index < 0 || index >= keyAttrData.length) return undefined;
+    const value = keyAttrData[index];
+    return Number.isFinite(value) ? value : undefined;
+}
+
+function cubicHermite(
+    value0: number,
+    value1: number,
+    slope0: number,
+    slope1: number,
+    segmentDuration: number,
+    t: number
+): number {
+    const t2 = t * t;
+    const t3 = t2 * t;
+    const h00 = 2 * t3 - 3 * t2 + 1;
+    const h10 = t3 - 2 * t2 + t;
+    const h01 = -2 * t3 + 3 * t2;
+    const h11 = t3 - t2;
+
+    return (
+        h00 * value0 +
+        h10 * segmentDuration * slope0 +
+        h01 * value1 +
+        h11 * segmentDuration * slope1
+    );
 }

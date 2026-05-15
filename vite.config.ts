@@ -3,7 +3,7 @@ import { resolve } from "path";
 
 export default defineConfig({
     root: "viewer",
-    assetsInclude: ["**/*.fbx", "**/*.glb"],
+    assetsInclude: ["**/*.{fbx,FBX,glb,GLB,env}"],
     resolve: {
         alias: {
             // Force Vite to use the ESM entry for the inspector (not the UMD dist/)

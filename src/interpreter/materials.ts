@@ -45,6 +45,8 @@ export interface FBXTextureRef {
     uvRotation?: number;
     /** Which UV set index this texture uses */
     uvSetIndex?: number;
+    /** Which named UV set this texture uses */
+    uvSetName?: string;
 }
 
 /**
@@ -146,6 +148,7 @@ function extractTextures(materialId: bigint, objectMap: FBXObjectMap): FBXTextur
         let uvTranslation: [number, number] | undefined;
         let uvScaling: [number, number] | undefined;
         let uvRotation: number | undefined;
+        let uvSetName: string | undefined;
         const texProps70 = findChildByName(node, "Properties70");
         if (texProps70) {
             for (const p of texProps70.children) {
@@ -161,9 +164,14 @@ function extractTextures(materialId: bigint, objectMap: FBXObjectMap): FBXTextur
                     if (u !== undefined && v !== undefined) uvScaling = [u, v];
                 } else if (pName === "UVRotation" || pName === "Rotation") {
                     uvRotation = toNumber(p.properties[4]?.value);
+                } else if (pName === "UVSet") {
+                    const value = p.properties[4]?.value;
+                    if (typeof value === "string" && value.length > 0) uvSetName = value;
                 }
             }
         }
+        uvTranslation ??= getNumberPairChild(node, "ModelUVTranslation");
+        uvScaling ??= getNumberPairChild(node, "ModelUVScaling");
 
         // Check for embedded texture data in connected Video node
         let embeddedData: Uint8Array | null = null;
@@ -189,6 +197,7 @@ function extractTextures(materialId: bigint, objectMap: FBXObjectMap): FBXTextur
             uvTranslation,
             uvScaling,
             uvRotation,
+            uvSetName,
         });
     }
 
@@ -215,6 +224,14 @@ function toNumber(value: unknown): number | undefined {
     if (typeof value === "number") return value;
     if (typeof value === "bigint") return Number(value);
     return undefined;
+}
+
+function getNumberPairChild(node: FBXNode, childName: string): [number, number] | undefined {
+    const child = findChildByName(node, childName);
+    if (!child) return undefined;
+    const u = toNumber(child.properties[0]?.value);
+    const v = toNumber(child.properties[1]?.value);
+    return u !== undefined && v !== undefined ? [u, v] : undefined;
 }
 
 
