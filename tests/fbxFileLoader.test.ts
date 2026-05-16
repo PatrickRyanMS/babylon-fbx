@@ -5,12 +5,14 @@ import { fileURLToPath, pathToFileURL } from "url";
 import { NullEngine } from "@babylonjs/core/Engines/nullEngine.js";
 import { Scene } from "@babylonjs/core/scene.js";
 import { StandardMaterial } from "@babylonjs/core/Materials/standardMaterial.js";
+import { Vector3, Quaternion } from "@babylonjs/core/Maths/math.vector.js";
 
 import { FBXFileLoader } from "../src/fbxFileLoader.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const alfaRomeoPath = resolve(__dirname, "models/alfa-romeo-stradale-1967/finish91.fbx");
+const aishaPath = resolve(__dirname, "models/anime-chibi-girl-aisha-by-seraphim/test2.fbx");
 
 describe("FBXFileLoader", () => {
     it("uses the FBX texture UVSet property to select secondary UV coordinates", async () => {
@@ -32,6 +34,38 @@ describe("FBXFileLoader", () => {
 
         const meshWithSecondUVSet = scene.meshes.find((mesh) => mesh.isVerticesDataPresent("uv2"));
         expect(meshWithSecondUVSet).toBeDefined();
+
+        scene.dispose();
+        engine.dispose();
+    });
+
+    it("preserves inherited FBX geometry-branch transforms for skinned meshes", async () => {
+        const engine = new NullEngine();
+        const scene = new Scene(engine);
+        const file = readFileSync(aishaPath);
+        const buffer = file.buffer.slice(file.byteOffset, file.byteOffset + file.byteLength);
+        const rootUrl = `${pathToFileURL(dirname(aishaPath)).href}/`;
+
+        await new FBXFileLoader().importMeshAsync(null, scene, buffer, rootUrl);
+
+        const body = scene.meshes.find((mesh) => mesh.name === "mainAisha:body");
+        expect(body).toBeDefined();
+
+        const worldScale = new Vector3();
+        const worldRotation = new Quaternion();
+        const worldTranslation = new Vector3();
+        body!.computeWorldMatrix(true).decompose(worldScale, worldRotation, worldTranslation);
+        expect(worldScale.x).toBeCloseTo(0.0922878854, 6);
+        expect(worldScale.y).toBeCloseTo(0.0922878854, 6);
+        expect(worldScale.z).toBeCloseTo(0.0922878854, 6);
+
+        const poseScale = new Vector3();
+        const poseRotation = new Quaternion();
+        const poseTranslation = new Vector3();
+        body!.getPoseMatrix().decompose(poseScale, poseRotation, poseTranslation);
+        expect(poseScale.x).toBeCloseTo(1 / 0.0922878854, 5);
+        expect(poseScale.y).toBeCloseTo(1 / 0.0922878854, 5);
+        expect(poseScale.z).toBeCloseTo(1 / 0.0922878854, 5);
 
         scene.dispose();
         engine.dispose();

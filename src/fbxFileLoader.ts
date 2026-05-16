@@ -218,12 +218,14 @@ export class FBXFileLoader implements ISceneLoaderPluginAsync {
         const meshes: Mesh[] = [];
         const transformNodes: TransformNode[] = [rootNode];
         const modelIdToNode = new Map<bigint, TransformNode>();
+        const fbxWorldIdentity = Matrix.Identity();
 
         for (const model of fbxScene.rootModels) {
             this._buildModel(
                 model,
                 scene,
                 rootNode,
+                fbxWorldIdentity,
                 materialCache,
                 nameFilter,
                 meshes,
@@ -326,6 +328,7 @@ export class FBXFileLoader implements ISceneLoaderPluginAsync {
         model: FBXModelData,
         scene: Scene,
         parent: Nullable<TransformNode>,
+        parentFBXWorldMatrix: Matrix,
         materialCache: Map<bigint, StandardMaterial>,
         nameFilter: ((name: string) => boolean) | null,
         meshes: Mesh[],
@@ -335,6 +338,9 @@ export class FBXFileLoader implements ISceneLoaderPluginAsync {
         skinBindingByGeometryId: Map<bigint, FBXSkinBindingData>,
         modelIdToNode: Map<bigint, TransformNode>
     ): void {
+        const localMatrix = FBXFileLoader._computeFBXModelLocalMatrix(model);
+        const fbxWorldMatrix = localMatrix.multiply(parentFBXWorldMatrix);
+
         if (model.geometry && model.subType === "Mesh") {
             // Create mesh
             if (nameFilter && !nameFilter(model.name)) {
@@ -355,7 +361,7 @@ export class FBXFileLoader implements ISceneLoaderPluginAsync {
             // scene/root conversion. Babylon applies the pose matrix in the same
             // space as the bone bind matrices.
             if (skeleton && skin) {
-                FBXFileLoader._applyFBXTransform(mesh, model);
+                FBXFileLoader._applyMatrixToTransform(mesh, fbxWorldMatrix);
                 mesh.computeWorldMatrix(true);
                 mesh.updatePoseMatrix(Matrix.Invert(mesh.getWorldMatrix()));
                 mesh.alwaysSelectAsActiveMesh = true;
@@ -395,7 +401,7 @@ export class FBXFileLoader implements ISceneLoaderPluginAsync {
 
             // Recurse children
             for (const child of model.children) {
-                this._buildModel(child, scene, mesh, materialCache, nameFilter, meshes, transformNodes, skeletonByGeometryId, skinByGeometryId, skinBindingByGeometryId, modelIdToNode);
+                this._buildModel(child, scene, mesh, fbxWorldMatrix, materialCache, nameFilter, meshes, transformNodes, skeletonByGeometryId, skinByGeometryId, skinBindingByGeometryId, modelIdToNode);
             }
         } else {
             // Transform node (Null type or no geometry)
@@ -417,7 +423,7 @@ export class FBXFileLoader implements ISceneLoaderPluginAsync {
 
             // Recurse children
             for (const child of model.children) {
-                this._buildModel(child, scene, transformNode, materialCache, nameFilter, meshes, transformNodes, skeletonByGeometryId, skinByGeometryId, skinBindingByGeometryId, modelIdToNode);
+                this._buildModel(child, scene, transformNode, fbxWorldMatrix, materialCache, nameFilter, meshes, transformNodes, skeletonByGeometryId, skinByGeometryId, skinBindingByGeometryId, modelIdToNode);
             }
         }
     }
@@ -1323,7 +1329,21 @@ export class FBXFileLoader implements ISceneLoaderPluginAsync {
         node: TransformNode | Mesh,
         model: FBXModelData
     ): void {
-        const localMatrix = FBXFileLoader._computeFBXLocalMatrix(
+        const localMatrix = FBXFileLoader._computeFBXModelLocalMatrix(model);
+
+        // Decompose into TRS
+        const s = new Vector3();
+        const r = new Quaternion();
+        const t = new Vector3();
+        localMatrix.decompose(s, r, t);
+
+        node.position = t;
+        node.rotationQuaternion = r;
+        node.scaling = s;
+    }
+
+    private static _computeFBXModelLocalMatrix(model: FBXModelData): Matrix {
+        return FBXFileLoader._computeFBXLocalMatrix(
             model.translation,
             model.rotation,
             model.scale,
@@ -1335,16 +1355,6 @@ export class FBXFileLoader implements ISceneLoaderPluginAsync {
             model.scalingOffset,
             model.rotationOrder
         );
-
-        // Decompose into TRS
-        const s = new Vector3();
-        const r = new Quaternion();
-        const t = new Vector3();
-        localMatrix.decompose(s, r, t);
-
-        node.position = t;
-        node.rotationQuaternion = r;
-        node.scaling = s;
     }
 
     private static _getBoneReferenceWorldMatrix(
