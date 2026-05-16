@@ -115,6 +115,22 @@ const modelOverrides: Record<string, ViewerModelOverride> = {
         name: "Spider (GLB reference)",
         defaultAnimation: "Spider_Walk",
     },
+    "anime-chibi-girl-aisha-by-seraphim/test2.fbx": {
+        name: "Aisha (FBX, animated)",
+        defaultAnimation: "Take 001",
+    },
+    "anime-chibi-girl-aisha-by-seraphim/anime_chibi_girl__aisha_by_seraphim.glb": {
+        name: "Aisha (GLB reference)",
+        defaultAnimation: "Take 001",
+    },
+    "bristleback-dota-fan-art/POSE.fbx": {
+        name: "Bristleback (FBX, animated)",
+        defaultAnimation: "animtion_bristleback_base",
+    },
+    "bristleback-dota-fan-art/bristleback_dota_fan-art.glb": {
+        name: "Bristleback (GLB reference)",
+        defaultAnimation: "animtion_bristleback_base",
+    },
     "valkyrie/valkyrie_asset.fbx": {
         name: "Valkyrie (binary v7.7)",
         textures: [{ slot: "diffuse", path: "valkyrie/valkyrie_low_baseColor.jpg" }],
@@ -131,12 +147,17 @@ const modelOverrides: Record<string, ViewerModelOverride> = {
         ],
     },
     "phoenix-bird/fly.fbx": {
-        name: "Phoenix Bird (animated)",
+        name: "Phoenix Bird (FBX, animated)",
         forceOpaque: true,
+        defaultAnimation: "Take 001",
         textures: [
             { slot: "diffuse", path: "phoenix-bird/Tex_Ride_FengHuang_01a_D_A.tga.png" },
             { slot: "emissive", path: "phoenix-bird/Tex_Ride_FengHuang_01a_E.tga.png" },
         ],
+    },
+    "phoenix-bird/phoenix_bird.glb": {
+        name: "Phoenix Bird (GLB reference)",
+        defaultAnimation: "Take 001",
     },
     "stylized-ww1-plane/PlaneAnimated with toon.fbx": {
         name: "WW1 Plane (animated)",
@@ -244,6 +265,12 @@ const modelOverrides: Record<string, ViewerModelOverride> = {
     },
     "the-last-stronghold-animated/Floating_Gate_Chinese1.fbx": {
         name: "The Last Stronghold (animated)",
+    },
+    "spartan-armour-mkv-halo-reach/Spartan_Sketchfab.fbx": {
+        name: "Spartan Armor (FBX)",
+    },
+    "spartan-armour-mkv-halo-reach/spartan_armour_mkv_-_halo_reach.glb": {
+        name: "Spartan Armor (GLB reference)",
     },
 };
 

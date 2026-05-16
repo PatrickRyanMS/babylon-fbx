@@ -208,12 +208,14 @@ export class FBXFileLoader implements ISceneLoaderPluginAsync {
         };
         collectModelData(fbxScene.rootModels);
 
-        // Build model hierarchy under a root node that converts RH→LH.
-        // This matches exactly what the glTF loader does with its __root__ node:
-        // rotation.y = PI + scaling.z = -1
+        // Build the FBX hierarchy under the same handedness conversion root that
+        // Babylon's glTF loader uses when loading right-handed assets into a
+        // left-handed scene.
         const rootNode = new TransformNode("__fbx_root__", scene);
-        rootNode.rotation.y = Math.PI;
-        rootNode.scaling.z = -1;
+        if (!scene.useRightHandedSystem) {
+            rootNode.rotation.y = Math.PI;
+            rootNode.scaling.z = -1;
+        }
 
         const meshes: Mesh[] = [];
         const transformNodes: TransformNode[] = [rootNode];
@@ -224,6 +226,7 @@ export class FBXFileLoader implements ISceneLoaderPluginAsync {
             this._buildModel(
                 model,
                 scene,
+                rootNode,
                 rootNode,
                 fbxWorldIdentity,
                 materialCache,
@@ -328,6 +331,7 @@ export class FBXFileLoader implements ISceneLoaderPluginAsync {
         model: FBXModelData,
         scene: Scene,
         parent: Nullable<TransformNode>,
+        assetRoot: TransformNode,
         parentFBXWorldMatrix: Matrix,
         materialCache: Map<bigint, StandardMaterial>,
         nameFilter: ((name: string) => boolean) | null,
@@ -357,13 +361,15 @@ export class FBXFileLoader implements ISceneLoaderPluginAsync {
 
             const mesh = this._createMesh(model, model.geometry, scene, skeleton, skin, skinBinding);
 
-            // For skinned meshes: keep the mesh transform independent from the
-            // scene/root conversion. Babylon applies the pose matrix in the same
-            // space as the bone bind matrices.
+            // For skinned meshes: keep bind/pose math in FBX space, but parent
+            // the rendered mesh under the same conversion root as non-skinned
+            // meshes. The pose matrix cancels the real FBX mesh transform only;
+            // the root handedness conversion remains applied once at render time.
             if (skeleton && skin) {
+                mesh.parent = assetRoot;
                 FBXFileLoader._applyMatrixToTransform(mesh, fbxWorldMatrix);
                 mesh.computeWorldMatrix(true);
-                mesh.updatePoseMatrix(Matrix.Invert(mesh.getWorldMatrix()));
+                mesh.updatePoseMatrix(Matrix.Invert(fbxWorldMatrix));
                 mesh.alwaysSelectAsActiveMesh = true;
             } else {
                 if (parent) {
@@ -401,7 +407,7 @@ export class FBXFileLoader implements ISceneLoaderPluginAsync {
 
             // Recurse children
             for (const child of model.children) {
-                this._buildModel(child, scene, mesh, fbxWorldMatrix, materialCache, nameFilter, meshes, transformNodes, skeletonByGeometryId, skinByGeometryId, skinBindingByGeometryId, modelIdToNode);
+                this._buildModel(child, scene, mesh, assetRoot, fbxWorldMatrix, materialCache, nameFilter, meshes, transformNodes, skeletonByGeometryId, skinByGeometryId, skinBindingByGeometryId, modelIdToNode);
             }
         } else {
             // Transform node (Null type or no geometry)
@@ -423,7 +429,7 @@ export class FBXFileLoader implements ISceneLoaderPluginAsync {
 
             // Recurse children
             for (const child of model.children) {
-                this._buildModel(child, scene, transformNode, fbxWorldMatrix, materialCache, nameFilter, meshes, transformNodes, skeletonByGeometryId, skinByGeometryId, skinBindingByGeometryId, modelIdToNode);
+                this._buildModel(child, scene, transformNode, assetRoot, fbxWorldMatrix, materialCache, nameFilter, meshes, transformNodes, skeletonByGeometryId, skinByGeometryId, skinBindingByGeometryId, modelIdToNode);
             }
         }
     }
