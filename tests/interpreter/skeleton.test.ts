@@ -11,6 +11,7 @@ const __dirname = dirname(__filename);
 const spiderPath = resolve(__dirname, "../models/spider-animated-character/Spider_sketchfab.fbx");
 const bristlebackPath = resolve(__dirname, "../models/bristleback-dota-fan-art/POSE.fbx");
 const wwiPlanePath = resolve(__dirname, "../models/stylized-ww1-plane/PlaneAnimated with toon.fbx");
+const aishaPath = resolve(__dirname, "../models/anime-chibi-girl-aisha-by-seraphim/test2.fbx");
 
 function loadSpider() {
     const buf = readFileSync(spiderPath);
@@ -26,6 +27,12 @@ function loadBristleback() {
 
 function loadWWIPlane() {
     const buf = readFileSync(wwiPlanePath);
+    const doc = parseBinaryFBX(buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength));
+    return interpretFBX(doc);
+}
+
+function loadAisha() {
+    const buf = readFileSync(aishaPath);
     const doc = parseBinaryFBX(buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength));
     return interpretFBX(doc);
 }
@@ -173,6 +180,70 @@ describe("Skeleton extraction", () => {
         const linearFrame18 = 30.738998 + ((18 - 16) / (28 - 16)) * (56.799999 - 30.738998);
         expect(cubicFrame18).toBeCloseTo(35.487, 3);
         expect(cubicFrame18!).toBeGreaterThan(linearFrame18);
+    });
+
+    it("should resolve Aisha skins to a shared deformation rig", () => {
+        const scene = loadAisha();
+        const bodySkin = scene.skins.find((skin) => skin.id === 2377474450000n);
+
+        expect(bodySkin).toBeDefined();
+
+        const rig = scene.rigs.find((candidate) =>
+            candidate.skinBindings.some((binding) => binding.skinId === bodySkin!.id)
+        );
+        expect(rig).toBeDefined();
+        expect(rig!.skinBindings.length).toBeGreaterThan(1);
+
+        const boneNames = rig!.bones.map((bone) => bone.name);
+        const deformationSystemIndex = boneNames.indexOf("mainAisha:DeformationSystem");
+        const rootMIndex = boneNames.indexOf("mainAisha:Root_M");
+
+        expect(deformationSystemIndex).toBeGreaterThanOrEqual(0);
+        expect(rootMIndex).toBeGreaterThanOrEqual(0);
+        expect(rig!.bones[rootMIndex].isCluster).toBe(true);
+
+        let parentIndex = rig!.bones[rootMIndex].parentIndex;
+        const parentNames: string[] = [];
+        while (parentIndex >= 0) {
+            const parent = rig!.bones[parentIndex];
+            parentNames.push(parent.name);
+            parentIndex = parent.parentIndex;
+        }
+
+        expect(parentNames).toContain("mainAisha:DeformationSystem");
+    });
+
+    it("should not treat Aisha FitSkeleton controls as deformation clusters", () => {
+        const scene = loadAisha();
+        const clusterNames = scene.rigs.flatMap((rig) =>
+            rig.bones
+                .filter((bone) => rig.clusterModelIds.has(bone.modelId))
+                .map((bone) => bone.name)
+        );
+
+        expect(clusterNames).toContain("mainAisha:Root_M");
+        expect(clusterNames).not.toContain("mainAisha:Root");
+        expect(clusterNames.some((name) => name.includes("FitSkeleton"))).toBe(false);
+    });
+
+    it("should remap Aisha skin-local cluster indices to rig-local bone indices", () => {
+        const scene = loadAisha();
+        const rig = scene.rigs.find((candidate) => candidate.skinBindings.length > 1);
+
+        expect(rig).toBeDefined();
+
+        for (const binding of rig!.skinBindings) {
+            const skin = scene.skins.find((candidate) => candidate.id === binding.skinId);
+            expect(skin).toBeDefined();
+
+            for (const bone of skin!.bones) {
+                if (!bone.isCluster) continue;
+
+                const rigBoneIndex = binding.skinBoneIndexToRigBoneIndex[bone.index];
+                expect(rigBoneIndex).toBeGreaterThanOrEqual(0);
+                expect(rig!.bones[rigBoneIndex].modelId).toBe(bone.modelId);
+            }
+        }
     });
 });
 

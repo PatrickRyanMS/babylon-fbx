@@ -4,6 +4,7 @@ import { resolveConnections, getChildren, type FBXObjectMap } from "./connection
 import { extractGeometry, type FBXGeometryData } from "./geometry.js";
 import { extractMaterial, type FBXMaterialData } from "./materials.js";
 import { extractSkins, type FBXSkinData } from "./skeleton.js";
+import { resolveRigs, type FBXRigData } from "./rig.js";
 import { extractAnimations, type FBXAnimationStackData } from "./animation.js";
 import { extractBlendShapes, type FBXBlendShapeData } from "./blendShapes.js";
 
@@ -90,6 +91,8 @@ export interface FBXSceneData {
     materials: FBXMaterialData[];
     /** Skin deformers (skeletons + vertex weights) */
     skins: FBXSkinData[];
+    /** Resolved deformation rigs shared by one or more skins */
+    rigs: FBXRigData[];
     /** Blend shape deformers (morph targets) */
     blendShapes: FBXBlendShapeData[];
     /** Animation stacks (clips) */
@@ -138,6 +141,7 @@ export function interpretFBX(doc: FBXDocument): FBXSceneData {
 
     // Extract skeleton/skinning data
     const skins = extractSkins(objectMap);
+    const rigs = resolveRigs(objectMap, skins);
 
     // Extract blend shape data
     const blendShapes = extractBlendShapes(objectMap);
@@ -157,6 +161,7 @@ export function interpretFBX(doc: FBXDocument): FBXSceneData {
         geometries,
         materials,
         skins,
+        rigs,
         blendShapes,
         animations,
         cameras,

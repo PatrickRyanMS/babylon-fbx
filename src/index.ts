@@ -7,4 +7,5 @@ export type { FBXSceneData, FBXModelData } from "./interpreter/fbxInterpreter.js
 export type { FBXGeometryData } from "./interpreter/geometry.js";
 export type { FBXMaterialData, FBXTextureRef, FBXMaterialProperties } from "./interpreter/materials.js";
 export type { FBXSkinData, FBXBoneData } from "./interpreter/skeleton.js";
+export type { FBXRigData, FBXRigBoneData, FBXSkinBindingData } from "./interpreter/rig.js";
 export type { FBXAnimationStackData, FBXCurveNodeData, FBXCurveData, FBXKeyframe } from "./interpreter/animation.js";

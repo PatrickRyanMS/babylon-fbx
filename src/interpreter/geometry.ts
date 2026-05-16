@@ -127,7 +127,7 @@ export function extractGeometry(geometryNode: FBXNode, nodeId: bigint): FBXGeome
         }
 
         if (!allSame) {
-            // Expand to per-triangle (fan triangulation: polygon with N verts → N-2 triangles)
+            // Expand to per-triangle (fan triangulation: polygon with N verts -> N-2 triangles)
             const triCount = result.indices.length / 3;
             materialIndices = new Int32Array(triCount);
             let triIdx = 0;

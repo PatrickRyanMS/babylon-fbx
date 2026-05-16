@@ -13,6 +13,8 @@ export interface FBXBoneData {
     index: number;
     /** Index of the parent bone (-1 for root) */
     parentIndex: number;
+    /** Whether this bone corresponds to an FBX Cluster with vertex weights */
+    isCluster: boolean;
     /** Local translation from parent (Lcl Translation) */
     translation: [number, number, number];
     /** Local rotation in degrees (Lcl Rotation) */
@@ -37,6 +39,8 @@ export interface FBXBoneData {
     bindPoseMatrix: Float64Array | null;
     /** Bone's world transform at bind time (cluster TransformLink, 4x4) */
     transformLinkMatrix: Float64Array | null;
+    /** Model's absolute matrix from the FBX BindPose, when present */
+    modelBindPoseMatrix: Float64Array | null;
 }
 
 /** Represents a skin deformer with its clusters */
@@ -106,7 +110,8 @@ function extractSkin(
     // skeleton-like ancestors even when they are not weighted clusters; some
     // rigs (for example 3ds Max Biped) animate a non-cluster root above the
     // clustered bones.
-    const bones = buildBoneHierarchy(boneModelMap, objectMap);
+    const bindPoseMatrices = extractBindPoseMatrices(geometryId, objectMap);
+    const bones = buildBoneHierarchy(boneModelMap, bindPoseMatrices, objectMap);
     if (bones.length === 0) return null;
 
     // Extract per-vertex weights from clusters
@@ -130,6 +135,7 @@ function extractSkin(
  */
 function buildBoneHierarchy(
     boneModelMap: Map<bigint, { clusterId: bigint; clusterNode: FBXNode }>,
+    bindPoseMatrices: Map<bigint, Float64Array>,
     objectMap: FBXObjectMap
 ): FBXBoneData[] {
     const bones: FBXBoneData[] = [];
@@ -167,6 +173,7 @@ function buildBoneHierarchy(
             name: cleanFBXName(getPropertyValue<string>(modelNode, 1) ?? `Bone${boneIndex}`),
             index: boneIndex,
             parentIndex,
+            isCluster: clusterInfo !== undefined,
             translation: transform.translation,
             rotation: transform.rotation,
             preRotation: transform.preRotation,
@@ -179,6 +186,7 @@ function buildBoneHierarchy(
             rotationOrder: transform.rotationOrder,
             bindPoseMatrix,
             transformLinkMatrix,
+            modelBindPoseMatrix: bindPoseMatrices.get(modelId) ?? null,
         });
 
         for (const childId of childrenByModelId.get(modelId) ?? []) {
@@ -189,6 +197,41 @@ function buildBoneHierarchy(
     }
 
     return bones;
+}
+
+function extractBindPoseMatrices(geometryId: bigint, objectMap: FBXObjectMap): Map<bigint, Float64Array> {
+    const modelParent = objectMap.parentOf.get(geometryId);
+    const modelParentNode = modelParent ? objectMap.objects.get(modelParent.id) : undefined;
+    const modelId = modelParentNode?.name === "Model" ? modelParent!.id : undefined;
+    if (modelId === undefined) return new Map();
+
+    for (const [, poseNode] of objectMap.objects) {
+        if (poseNode.name !== "Pose" || getPropertyValue<string>(poseNode, 2) !== "BindPose") {
+            continue;
+        }
+
+        const matrices = new Map<bigint, Float64Array>();
+        for (const poseChild of poseNode.children) {
+            if (poseChild.name !== "PoseNode") continue;
+
+            const nodeChild = findChildByName(poseChild, "Node");
+            const matrixChild = findChildByName(poseChild, "Matrix");
+            const nodeId = nodeChild?.properties[0]?.value;
+            const matrixValue = matrixChild?.properties[0]?.value;
+            if (typeof nodeId !== "bigint") continue;
+
+            const matrix = toFloat64Array(matrixValue);
+            if (matrix?.length === 16) {
+                matrices.set(nodeId, matrix);
+            }
+        }
+
+        if (matrices.has(modelId)) {
+            return matrices;
+        }
+    }
+
+    return new Map();
 }
 
 function buildSkeletonChildrenMap(
@@ -220,7 +263,7 @@ function collectSkeletonModelIds(
         let parentId = findModelParentId(modelId, objectMap);
         while (parentId !== undefined) {
             const parentNode = objectMap.objects.get(parentId);
-            if (!parentNode || parentNode.name !== "Model" || !isSkeletonModel(parentNode)) {
+            if (!parentNode || parentNode.name !== "Model") {
                 break;
             }
 
@@ -261,12 +304,12 @@ function findModelParentId(modelId: bigint, objectMap: FBXObjectMap): bigint | u
     return parentConnection?.parentId;
 }
 
-function isSkeletonModel(modelNode: FBXNode): boolean {
+export function isSkeletonModel(modelNode: FBXNode): boolean {
     const subType = getPropertyValue<string>(modelNode, 2);
     return subType === "Root" || subType === "LimbNode";
 }
 
-function extractBoneTransform(modelNode: FBXNode): {
+export function extractBoneTransform(modelNode: FBXNode): {
     translation: [number, number, number];
     rotation: [number, number, number];
     preRotation: [number, number, number];

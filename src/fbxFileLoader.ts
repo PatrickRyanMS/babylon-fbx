@@ -35,6 +35,7 @@ import type { FBXDocument } from "./types/fbxTypes.js";
 import type { FBXGeometryData } from "./interpreter/geometry.js";
 import type { FBXMaterialData } from "./interpreter/materials.js";
 import type { FBXSkinData, FBXBoneData } from "./interpreter/skeleton.js";
+import type { FBXRigData, FBXSkinBindingData } from "./interpreter/rig.js";
 import type { FBXBlendShapeData } from "./interpreter/blendShapes.js";
 import { sampleFBXCurveAtTime, type FBXAnimationStackData, type FBXCurveData, type FBXCurveNodeData } from "./interpreter/animation.js";
 
@@ -169,38 +170,43 @@ export class FBXFileLoader implements ISceneLoaderPluginAsync {
             materialCache.set(matData.id, material);
         }
 
-        // Create skeletons
+        // Create one Babylon skeleton per resolved deformation rig.
         const skeletons: Skeleton[] = [];
+        const skeletonByRigId = new Map<string, Skeleton>();
         const skeletonByGeometryId = new Map<bigint, Skeleton>();
         const skinByGeometryId = new Map<bigint, FBXSkinData>();
-        const bonePreRotations = new Map<bigint, [number, number, number]>();
-        const boneRotationOrders = new Map<bigint, number>();
+        const skinBindingByGeometryId = new Map<bigint, FBXSkinBindingData>();
+        const skinById = new Map<bigint, FBXSkinData>();
 
         for (const skin of fbxScene.skins) {
-            const skeleton = this._createSkeleton(skin, scene);
-            skeletons.push(skeleton);
-            skeletonByGeometryId.set(skin.geometryId, skeleton);
-            skinByGeometryId.set(skin.geometryId, skin);
-
-            for (const boneData of skin.bones) {
-                bonePreRotations.set(boneData.modelId, boneData.preRotation);
-                boneRotationOrders.set(boneData.modelId, boneData.rotationOrder);
-            }
+            skinById.set(skin.id, skin);
         }
 
-        // Collect preRotation/rotationOrder from all models for non-skinned animations
+        for (const rig of fbxScene.rigs) {
+            const skeleton = this._createSkeleton(rig.id, rig.bones, scene);
+            skeletons.push(skeleton);
+            skeletonByRigId.set(rig.id, skeleton);
+
+            for (const binding of rig.skinBindings) {
+                const skin = skinById.get(binding.skinId);
+                if (!skin) continue;
+
+                skeletonByGeometryId.set(binding.geometryId, skeleton);
+                skinByGeometryId.set(binding.geometryId, skin);
+                skinBindingByGeometryId.set(binding.geometryId, binding);
+            }
+
+        }
+
+        // Collect model data for animation sampling.
         const modelIdToData = new Map<bigint, FBXModelData>();
-        const collectModelRotationData = (models: FBXModelData[]) => {
+        const collectModelData = (models: FBXModelData[]) => {
             for (const m of models) {
                 modelIdToData.set(m.id, m);
-                if (!bonePreRotations.has(m.id)) {
-                    bonePreRotations.set(m.id, m.preRotation);
-                    boneRotationOrders.set(m.id, m.rotationOrder);
-                }
-                collectModelRotationData(m.children);
+                collectModelData(m.children);
             }
         };
-        collectModelRotationData(fbxScene.rootModels);
+        collectModelData(fbxScene.rootModels);
 
         // Build model hierarchy under a root node that converts RH→LH.
         // This matches exactly what the glTF loader does with its __root__ node:
@@ -224,6 +230,7 @@ export class FBXFileLoader implements ISceneLoaderPluginAsync {
                 transformNodes,
                 skeletonByGeometryId,
                 skinByGeometryId,
+                skinBindingByGeometryId,
                 modelIdToNode
             );
         }
@@ -231,14 +238,17 @@ export class FBXFileLoader implements ISceneLoaderPluginAsync {
         // Link non-skinned child meshes/nodes to their parent bones so they
         // follow skeletal animation. Preserve their current world matrix when
         // switching from the FBX model hierarchy to Babylon's bone parent.
-        for (let si = 0; si < fbxScene.skins.length; si++) {
-            const skin = fbxScene.skins[si];
-            const skeleton = skeletons[si];
-            const boneModelIds = new Set(skin.bones.map(b => b.modelId));
+        for (const rig of fbxScene.rigs) {
+            const skeleton = skeletonByRigId.get(rig.id);
+            if (!skeleton) continue;
+
+            const boneModelIds = new Set(rig.bones.map(b => b.modelId));
             const skinnedMesh = meshes.find(m => m.skeleton === skeleton) ?? null;
             const boneReferenceNode = skinnedMesh ?? rootNode;
 
-            for (const boneData of skin.bones) {
+            for (const boneData of rig.bones) {
+                if (!boneData.isCluster) continue;
+
                 const boneNode = modelIdToNode.get(boneData.modelId);
                 const bone = skeleton.bones[boneData.index];
                 if (!boneNode || !bone) continue;
@@ -282,7 +292,7 @@ export class FBXFileLoader implements ISceneLoaderPluginAsync {
         // Create animation groups
         const animationGroups: AnimationGroup[] = [];
         for (const animStack of fbxScene.animations) {
-            const group = this._createAnimationGroup(animStack, fbxScene.skins, skeletons, bonePreRotations, boneRotationOrders, scene, modelIdToNode, modelIdToData, meshes);
+            const group = this._createAnimationGroup(animStack, fbxScene.rigs, skeletonByRigId, scene, modelIdToNode, modelIdToData, meshes);
             if (group) animationGroups.push(group);
         }
 
@@ -322,6 +332,7 @@ export class FBXFileLoader implements ISceneLoaderPluginAsync {
         transformNodes: TransformNode[],
         skeletonByGeometryId: Map<bigint, Skeleton>,
         skinByGeometryId: Map<bigint, FBXSkinData>,
+        skinBindingByGeometryId: Map<bigint, FBXSkinBindingData>,
         modelIdToNode: Map<bigint, TransformNode>
     ): void {
         if (model.geometry && model.subType === "Mesh") {
@@ -332,23 +343,22 @@ export class FBXFileLoader implements ISceneLoaderPluginAsync {
 
             const skeleton = skeletonByGeometryId.get(model.geometry.id);
             const skin = skinByGeometryId.get(model.geometry.id);
+            const skinBinding = skinBindingByGeometryId.get(model.geometry.id);
 
             if (skeleton && skin) {
                 skeleton.needInitialSkinMatrix = true;
             }
 
-            const mesh = this._createMesh(model, model.geometry, scene, skeleton, skin);
+            const mesh = this._createMesh(model, model.geometry, scene, skeleton, skin, skinBinding);
 
-            // For skinned meshes: apply the FBX mesh transform as the mesh's
-            // initial pose, not as baked vertex data and not as part of the bone
-            // inverse bind. Babylon's skeleton pose path keeps the mesh transform
-            // and skinning bind matrices independent.
+            // For skinned meshes: keep the mesh transform independent from the
+            // scene/root conversion. Babylon applies the pose matrix in the same
+            // space as the bone bind matrices.
             if (skeleton && skin) {
                 FBXFileLoader._applyFBXTransform(mesh, model);
                 mesh.computeWorldMatrix(true);
                 mesh.updatePoseMatrix(Matrix.Invert(mesh.getWorldMatrix()));
                 mesh.alwaysSelectAsActiveMesh = true;
-                // Parent under scene root (parent is already set to null by default)
             } else {
                 if (parent) {
                     mesh.parent = parent;
@@ -385,7 +395,7 @@ export class FBXFileLoader implements ISceneLoaderPluginAsync {
 
             // Recurse children
             for (const child of model.children) {
-                this._buildModel(child, scene, mesh, materialCache, nameFilter, meshes, transformNodes, skeletonByGeometryId, skinByGeometryId, modelIdToNode);
+                this._buildModel(child, scene, mesh, materialCache, nameFilter, meshes, transformNodes, skeletonByGeometryId, skinByGeometryId, skinBindingByGeometryId, modelIdToNode);
             }
         } else {
             // Transform node (Null type or no geometry)
@@ -407,7 +417,7 @@ export class FBXFileLoader implements ISceneLoaderPluginAsync {
 
             // Recurse children
             for (const child of model.children) {
-                this._buildModel(child, scene, transformNode, materialCache, nameFilter, meshes, transformNodes, skeletonByGeometryId, skinByGeometryId, modelIdToNode);
+                this._buildModel(child, scene, transformNode, materialCache, nameFilter, meshes, transformNodes, skeletonByGeometryId, skinByGeometryId, skinBindingByGeometryId, modelIdToNode);
             }
         }
     }
@@ -417,7 +427,8 @@ export class FBXFileLoader implements ISceneLoaderPluginAsync {
         geomData: FBXGeometryData,
         scene: Scene,
         skeleton?: Skeleton,
-        skin?: FBXSkinData
+        skin?: FBXSkinData,
+        skinBinding?: FBXSkinBindingData
     ): Mesh {
         const mesh = new Mesh(model.name, scene);
         const vertexData = new VertexData();
@@ -525,7 +536,8 @@ export class FBXFileLoader implements ISceneLoaderPluginAsync {
         if (skeleton && skin) {
             const { matricesIndices, matricesWeights } = this._buildSkinningData(
                 geomData,
-                skin
+                skin,
+                skinBinding
             );
             vertexData.matricesIndices = matricesIndices;
             vertexData.matricesWeights = matricesWeights;
@@ -708,7 +720,8 @@ export class FBXFileLoader implements ISceneLoaderPluginAsync {
      */
     private _buildSkinningData(
         geomData: FBXGeometryData,
-        skin: FBXSkinData
+        skin: FBXSkinData,
+        skinBinding?: FBXSkinBindingData
     ): { matricesIndices: Float32Array; matricesWeights: Float32Array } {
         // The positions array is per-polygon-vertex (already expanded).
         // We need to figure out the control point index for each polygon vertex.
@@ -739,7 +752,18 @@ export class FBXFileLoader implements ISceneLoaderPluginAsync {
                 const boneWts = skin.boneWeights[cpIdx] ?? [];
 
                 for (let j = 0; j < 4; j++) {
-                    matricesIndices[i * 4 + j] = j < boneIdx.length ? boneIdx[j] : 0;
+                    if (j < boneIdx.length) {
+                        const skinBoneIndex = boneIdx[j];
+                        const rigBoneIndex = skinBinding
+                            ? skinBinding.skinBoneIndexToRigBoneIndex[skinBoneIndex]
+                            : skinBoneIndex;
+                        if (rigBoneIndex === undefined || rigBoneIndex < 0) {
+                            throw new Error(`FBXFileLoader: missing rig bone mapping for skin bone index ${skinBoneIndex}`);
+                        }
+                        matricesIndices[i * 4 + j] = rigBoneIndex;
+                    } else {
+                        matricesIndices[i * 4 + j] = 0;
+                    }
                     matricesWeights[i * 4 + j] = j < boneWts.length ? boneWts[j] : 0;
                 }
             }
@@ -1091,15 +1115,16 @@ export class FBXFileLoader implements ISceneLoaderPluginAsync {
         return light;
     }
 
-    private _createSkeleton(skin: FBXSkinData, scene: Scene): Skeleton {
-        const skeleton = new Skeleton("Skeleton", "skeleton_" + skin.id.toString(), scene);
+    private _createSkeleton(skeletonId: string, bones: FBXBoneData[], scene: Scene): Skeleton {
+        const skeleton = new Skeleton("Skeleton", `skeleton_${skeletonId}`, scene);
         const babylonBones: Bone[] = [];
         const restLocalMatrices: Matrix[] = [];
+        const restAbsoluteMatrices: Matrix[] = [];
 
         // Phase 1: Create bones with localMatrix = computedLcl (the bone's rest pose
         // from Lcl properties). This is what animation curves naturally target.
-        for (let i = 0; i < skin.bones.length; i++) {
-            const boneData = skin.bones[i];
+        for (let i = 0; i < bones.length; i++) {
+            const boneData = bones[i];
             const parentBone = boneData.parentIndex >= 0 ? babylonBones[boneData.parentIndex] : null;
 
             const computedLcl = FBXFileLoader._computeFBXLocalMatrix(
@@ -1115,6 +1140,9 @@ export class FBXFileLoader implements ISceneLoaderPluginAsync {
                 boneData.rotationOrder
             );
             restLocalMatrices[i] = computedLcl;
+            restAbsoluteMatrices[i] = parentBone
+                ? computedLcl.multiply(restAbsoluteMatrices[boneData.parentIndex])
+                : computedLcl;
 
             const bone = new Bone(
                 boneData.name,
@@ -1128,21 +1156,20 @@ export class FBXFileLoader implements ISceneLoaderPluginAsync {
             babylonBones.push(bone);
         }
 
-        // Phase 2: Set bind matrices independently (GLTF loader pattern).
-        // FBX Cluster TransformLink is the bone's absolute bind matrix. Cluster
-        // Transform is exporter-dependent and can vary per cluster, so folding
-        // it into the inverse bind corrupts normal rest-pose skinning.
-        for (let i = 0; i < skin.bones.length; i++) {
-            const boneData = skin.bones[i];
+        const absoluteBindMatrices = bones.map((boneData, index) =>
+            boneData.transformLinkMatrix
+                ? Matrix.FromArray(boneData.transformLinkMatrix)
+                : boneData.modelBindPoseMatrix
+                    ? Matrix.FromArray(boneData.modelBindPoseMatrix)
+                : restAbsoluteMatrices[index]
+        );
+
+        // Phase 2: Set bind/rest matrices from FBX TransformLink. Maya-style
+        // files may omit some cluster bind entries, but still carry per-model
+        // BindPose matrices for helper/container bones.
+        for (let i = 0; i < bones.length; i++) {
             const bone = babylonBones[i];
-
-            if (!boneData.transformLinkMatrix) {
-                bone.updateMatrix(restLocalMatrices[i], true, true);
-                bone._updateAbsoluteBindMatrices(undefined, false);
-                continue;
-            }
-
-            const absoluteBind = Matrix.FromArray(boneData.transformLinkMatrix);
+            const absoluteBind = absoluteBindMatrices[i];
 
             // Derive localBind = absoluteBind × inv(parentAbsoluteBind)
             const parentBone = bone.getParent();
@@ -1154,7 +1181,6 @@ export class FBXFileLoader implements ISceneLoaderPluginAsync {
                 localBind = absoluteBind;
             }
 
-            // Set bind matrix without changing local (false, false) — same as GLTF loader
             bone.updateMatrix(localBind, false, false);
             bone._updateAbsoluteBindMatrices(undefined, false);
         }
@@ -1349,10 +1375,8 @@ export class FBXFileLoader implements ISceneLoaderPluginAsync {
 
     private _createAnimationGroup(
         animStack: FBXAnimationStackData,
-        skins: FBXSkinData[],
-        skeletons: Skeleton[],
-        bonePreRotations: Map<bigint, [number, number, number]>,
-        boneRotationOrders: Map<bigint, number>,
+        rigs: FBXRigData[],
+        skeletonByRigId: Map<string, Skeleton>,
         scene: Scene,
         modelIdToNode: Map<bigint, TransformNode>,
         modelIdToData: Map<bigint, FBXModelData>,
@@ -1362,21 +1386,23 @@ export class FBXFileLoader implements ISceneLoaderPluginAsync {
 
         const animGroup = new AnimationGroup(animStack.name, scene);
 
-        // Build a map from model ID to all skeleton bones for targeting.
-        // Multiple skinned meshes can clone the same FBX armature into separate
-        // Babylon skeletons, so a single FBX animation target may need to drive
-        // more than one Bone instance.
+        // Build a map from model ID to resolved rig bones. A single FBX model ID
+        // should only appear once per resolved rig, but keeping an array preserves
+        // the previous animation fan-out behavior for any future duplicate rigs.
         const modelIdToBones = new Map<bigint, Bone[]>();
-        for (let si = 0; si < skins.length; si++) {
-            const skeleton = skeletons[si];
-            const skin = skins[si];
-            for (const boneData of skin.bones) {
+        for (const rig of rigs) {
+            const skeleton = skeletonByRigId.get(rig.id);
+            if (!skeleton) continue;
+
+            for (const boneData of rig.bones) {
                 const bone = skeleton.bones[boneData.index];
-                if (bone) {
-                    if (!modelIdToBones.has(boneData.modelId)) {
-                        modelIdToBones.set(boneData.modelId, []);
-                    }
-                    modelIdToBones.get(boneData.modelId)!.push(bone);
+                if (!bone) continue;
+
+                const bones = modelIdToBones.get(boneData.modelId);
+                if (bones) {
+                    bones.push(bone);
+                } else {
+                    modelIdToBones.set(boneData.modelId, [bone]);
                 }
             }
         }
@@ -1392,8 +1418,7 @@ export class FBXFileLoader implements ISceneLoaderPluginAsync {
                 continue;
             }
 
-            const bones = modelIdToBones.get(curveNode.targetModelId);
-            if (bones && bones.length > 0) {
+            if (modelIdToBones.has(curveNode.targetModelId)) {
                 if (!boneCurves.has(curveNode.targetModelId)) {
                     boneCurves.set(curveNode.targetModelId, []);
                 }
@@ -1407,8 +1432,7 @@ export class FBXFileLoader implements ISceneLoaderPluginAsync {
         }
 
         // Process bone targets: compute full FBX local matrix per frame, decompose to TRS.
-        // No per-key correction is applied; animation curves drive the FBX local
-        // transform chain, while bind matrices remain independent.
+        // Bind matrices handle skinning offsets; animation curves drive local bone transforms.
         for (const [targetId, curveNodes] of boneCurves) {
             const bones = modelIdToBones.get(targetId);
             const modelData = modelIdToData.get(targetId);
@@ -1624,6 +1648,51 @@ export class FBXFileLoader implements ISceneLoaderPluginAsync {
         return true;
     }
 
+    private _sampleModelLocalMatrix(
+        modelData: FBXModelData,
+        curveNodes: FBXCurveNodeData[],
+        time: number
+    ): Matrix {
+        const tNode = curveNodes.find(cn => cn.type === "T");
+        const rNode = curveNodes.find(cn => cn.type === "R");
+        const sNode = curveNodes.find(cn => cn.type === "S");
+
+        const txCurve = tNode?.curves.find(c => c.channel === "d|X");
+        const tyCurve = tNode?.curves.find(c => c.channel === "d|Y");
+        const tzCurve = tNode?.curves.find(c => c.channel === "d|Z");
+        const rxCurve = rNode?.curves.find(c => c.channel === "d|X");
+        const ryCurve = rNode?.curves.find(c => c.channel === "d|Y");
+        const rzCurve = rNode?.curves.find(c => c.channel === "d|Z");
+        const sxCurve = sNode?.curves.find(c => c.channel === "d|X");
+        const syCurve = sNode?.curves.find(c => c.channel === "d|Y");
+        const szCurve = sNode?.curves.find(c => c.channel === "d|Z");
+
+        return FBXFileLoader._computeFBXLocalMatrix(
+            [
+                sampleFBXCurveAtTime(txCurve, time) ?? modelData.translation[0],
+                sampleFBXCurveAtTime(tyCurve, time) ?? modelData.translation[1],
+                sampleFBXCurveAtTime(tzCurve, time) ?? modelData.translation[2],
+            ],
+            [
+                sampleFBXCurveAtTime(rxCurve, time) ?? modelData.rotation[0],
+                sampleFBXCurveAtTime(ryCurve, time) ?? modelData.rotation[1],
+                sampleFBXCurveAtTime(rzCurve, time) ?? modelData.rotation[2],
+            ],
+            [
+                sampleFBXCurveAtTime(sxCurve, time) ?? modelData.scale[0],
+                sampleFBXCurveAtTime(syCurve, time) ?? modelData.scale[1],
+                sampleFBXCurveAtTime(szCurve, time) ?? modelData.scale[2],
+            ],
+            modelData.preRotation,
+            modelData.postRotation,
+            modelData.rotationPivot,
+            modelData.scalingPivot,
+            modelData.rotationOffset,
+            modelData.scalingOffset,
+            modelData.rotationOrder
+        );
+    }
+
     /**
      * Build matrix-baked bone animation from full FBX local transforms.
      * The bind matrix carries the skinning offset, so animation curves drive
@@ -1634,7 +1703,8 @@ export class FBXFileLoader implements ISceneLoaderPluginAsync {
         boneName: string,
         modelData: FBXModelData,
         startTime: number,
-        stopTime: number
+        stopTime: number,
+        bindLocalMatrix?: Matrix
     ): Animation[] {
         const fps = 30;
 
@@ -1661,6 +1731,23 @@ export class FBXFileLoader implements ISceneLoaderPluginAsync {
         const rotKeys: { frame: number; value: Quaternion }[] = [];
         const sclKeys: { frame: number; value: Vector3 }[] = [];
         let prevQuat: Quaternion | null = null;
+        let restLocalInverse: Matrix | null = null;
+        if (bindLocalMatrix) {
+            const restLocalMatrix = FBXFileLoader._computeFBXLocalMatrix(
+                modelData.translation,
+                modelData.rotation,
+                modelData.scale,
+                modelData.preRotation,
+                modelData.postRotation,
+                modelData.rotationPivot,
+                modelData.scalingPivot,
+                modelData.rotationOffset,
+                modelData.scalingOffset,
+                modelData.rotationOrder
+            );
+            restLocalInverse = new Matrix();
+            restLocalMatrix.invertToRef(restLocalInverse);
+        }
 
         for (const time of times) {
             const frame = time * fps;
@@ -1690,13 +1777,15 @@ export class FBXFileLoader implements ISceneLoaderPluginAsync {
                 modelData.rotationOrder
             );
 
-            // Decompose into TRS
+            const correctedLocalMatrix = restLocalInverse && bindLocalMatrix
+                ? bindLocalMatrix.multiply(restLocalInverse).multiply(localMatrix)
+                : localMatrix;
+
             const s = new Vector3();
             const r = new Quaternion();
             const t = new Vector3();
-            localMatrix.decompose(s, r, t);
+            correctedLocalMatrix.decompose(s, r, t);
 
-            // Ensure quaternion continuity
             if (prevQuat && Quaternion.Dot(prevQuat, r) < 0) {
                 r.scaleInPlace(-1);
             }
