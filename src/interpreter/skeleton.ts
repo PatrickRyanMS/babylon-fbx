@@ -3,6 +3,8 @@ import { findChildByName, getPropertyValue, cleanFBXName } from "../types/fbxTyp
 import type { FBXObjectMap } from "./connections.js";
 import { getChildren } from "./connections.js";
 
+const MAX_BONE_INFLUENCES = 8;
+
 /** Represents a single bone (cluster) in the FBX skeleton */
 export interface FBXBoneData {
     /** The Model node ID for this bone */
@@ -35,10 +37,14 @@ export interface FBXBoneData {
     scale: [number, number, number];
     /** Rotation order: 0=XYZ, 1=XZY, 2=YZX, 3=YXZ, 4=ZXY, 5=ZYX */
     rotationOrder: number;
+    /** FBX transform inheritance mode. 0=RrSs, 1=RSrs, 2=Rrs */
+    inheritType: number;
     /** Bind pose transform matrix (cluster Transform, 4x4) */
     bindPoseMatrix: Float64Array | null;
     /** Bone's world transform at bind time (cluster TransformLink, 4x4) */
     transformLinkMatrix: Float64Array | null;
+    /** Associate model world transform at bind time (cluster TransformAssociateModel, 4x4) */
+    transformAssociateModelMatrix: Float64Array | null;
     /** Model's absolute matrix from the FBX BindPose, when present */
     modelBindPoseMatrix: Float64Array | null;
 }
@@ -51,9 +57,9 @@ export interface FBXSkinData {
     geometryId: bigint;
     /** Bones in this skeleton */
     bones: FBXBoneData[];
-    /** Per-vertex bone indices (up to 4 influences per vertex) */
+    /** Per-vertex bone indices, sorted by descending weight and capped for Babylon skinning */
     boneIndices: number[][];
-    /** Per-vertex bone weights (matching boneIndices) */
+    /** Per-vertex bone weights, matching boneIndices */
     boneWeights: number[][];
 }
 
@@ -164,9 +170,9 @@ function buildBoneHierarchy(
 
         const clusterInfo = boneModelMap.get(modelId);
         const transform = extractBoneTransform(modelNode);
-        const { bindPoseMatrix, transformLinkMatrix } = clusterInfo
+        const { bindPoseMatrix, transformLinkMatrix, transformAssociateModelMatrix } = clusterInfo
             ? extractClusterMatrices(clusterInfo.clusterNode)
-            : { bindPoseMatrix: null, transformLinkMatrix: null };
+            : { bindPoseMatrix: null, transformLinkMatrix: null, transformAssociateModelMatrix: null };
 
         bones.push({
             modelId,
@@ -184,8 +190,10 @@ function buildBoneHierarchy(
             scalingOffset: transform.scalingOffset,
             scale: transform.scale,
             rotationOrder: transform.rotationOrder,
+            inheritType: transform.inheritType,
             bindPoseMatrix,
             transformLinkMatrix,
+            transformAssociateModelMatrix,
             modelBindPoseMatrix: bindPoseMatrices.get(modelId) ?? null,
         });
 
@@ -320,6 +328,7 @@ export function extractBoneTransform(modelNode: FBXNode): {
     scalingOffset: [number, number, number];
     scale: [number, number, number];
     rotationOrder: number;
+    inheritType: number;
 } {
     const translation: [number, number, number] = [0, 0, 0];
     const rotation: [number, number, number] = [0, 0, 0];
@@ -331,9 +340,10 @@ export function extractBoneTransform(modelNode: FBXNode): {
     const scalingOffset: [number, number, number] = [0, 0, 0];
     const scale: [number, number, number] = [1, 1, 1];
     let rotationOrder = 0;
+    let inheritType = 1;
 
     const props70 = findChildByName(modelNode, "Properties70");
-    if (!props70) return { translation, rotation, preRotation, postRotation, rotationPivot, scalingPivot, rotationOffset, scalingOffset, scale, rotationOrder };
+    if (!props70) return { translation, rotation, preRotation, postRotation, rotationPivot, scalingPivot, rotationOffset, scalingOffset, scale, rotationOrder, inheritType };
 
     for (const p of props70.children) {
         if (p.name !== "P") continue;
@@ -389,18 +399,23 @@ export function extractBoneTransform(modelNode: FBXNode): {
             case "RotationOrder":
                 rotationOrder = toNumber(p.properties[4]?.value) ?? 0;
                 break;
+            case "InheritType":
+                inheritType = toNumber(p.properties[4]?.value) ?? 1;
+                break;
         }
     }
 
-    return { translation, rotation, preRotation, postRotation, rotationPivot, scalingPivot, rotationOffset, scalingOffset, scale, rotationOrder };
+    return { translation, rotation, preRotation, postRotation, rotationPivot, scalingPivot, rotationOffset, scalingOffset, scale, rotationOrder, inheritType };
 }
 
 function extractClusterMatrices(clusterNode: FBXNode): {
     bindPoseMatrix: Float64Array | null;
     transformLinkMatrix: Float64Array | null;
+    transformAssociateModelMatrix: Float64Array | null;
 } {
     let bindPoseMatrix: Float64Array | null = null;
     let transformLinkMatrix: Float64Array | null = null;
+    let transformAssociateModelMatrix: Float64Array | null = null;
 
     const transformNode = findChildByName(clusterNode, "Transform");
     if (transformNode && transformNode.properties[0]) {
@@ -422,7 +437,17 @@ function extractClusterMatrices(clusterNode: FBXNode): {
         }
     }
 
-    return { bindPoseMatrix, transformLinkMatrix };
+    const transformAssociateModelNode = findChildByName(clusterNode, "TransformAssociateModel");
+    if (transformAssociateModelNode && transformAssociateModelNode.properties[0]) {
+        const val = transformAssociateModelNode.properties[0].value;
+        if (val instanceof Float64Array && val.length === 16) {
+            transformAssociateModelMatrix = val;
+        } else if (val instanceof Float32Array && val.length === 16) {
+            transformAssociateModelMatrix = new Float64Array(val);
+        }
+    }
+
+    return { bindPoseMatrix, transformLinkMatrix, transformAssociateModelMatrix };
 }
 
 /**
@@ -482,18 +507,18 @@ function extractVertexWeights(
         }
     }
 
-    // Normalize: limit to 4 influences per vertex, sort by weight descending
+    // Sort by weight descending and cap to Babylon's primary + extra influence buffers.
     for (let i = 0; i < vertexCount; i++) {
-        if (boneIndices[i].length <= 4) continue;
+        if (boneIndices[i].length === 0) continue;
 
-        // Sort by weight descending and keep top 4
         const pairs = boneIndices[i].map((bi, idx) => ({
             index: bi,
             weight: boneWeights[i][idx],
         }));
         pairs.sort((a, b) => b.weight - a.weight);
-        boneIndices[i] = pairs.slice(0, 4).map((p) => p.index);
-        boneWeights[i] = pairs.slice(0, 4).map((p) => p.weight);
+        const cappedPairs = pairs.slice(0, MAX_BONE_INFLUENCES);
+        boneIndices[i] = cappedPairs.map((p) => p.index);
+        boneWeights[i] = cappedPairs.map((p) => p.weight);
     }
 
     // Normalize weights to sum to 1.0

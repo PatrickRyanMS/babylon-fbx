@@ -41,6 +41,8 @@ export interface FBXModelData {
     geometricScaling: [number, number, number];
     /** Rotation order: 0=XYZ, 1=XZY, 2=YZX, 3=YXZ, 4=ZXY, 5=ZYX */
     rotationOrder: number;
+    /** FBX transform inheritance mode. 0=RrSs, 1=RSrs, 2=Rrs */
+    inheritType: number;
     /** Whether backface culling is disabled ("CullingOff") */
     cullingOff: boolean;
     /** User-defined custom properties from Properties70 */
@@ -269,6 +271,7 @@ function extractTransform(modelNode: FBXNode): {
     geometricRotation: [number, number, number];
     geometricScaling: [number, number, number];
     rotationOrder: number;
+    inheritType: number;
 } {
     const translation: [number, number, number] = [0, 0, 0];
     const rotation: [number, number, number] = [0, 0, 0];
@@ -283,83 +286,91 @@ function extractTransform(modelNode: FBXNode): {
     const geometricRotation: [number, number, number] = [0, 0, 0];
     const geometricScaling: [number, number, number] = [1, 1, 1];
     let rotationOrder = 0;
+    let inheritType = 1;
 
-    const props70 = modelNode.children.find((c) => c.name === "Properties70");
-    if (!props70) return { translation, rotation, scale, preRotation, postRotation, rotationPivot, scalingPivot, rotationOffset, scalingOffset, geometricTranslation, geometricRotation, geometricScaling, rotationOrder };
+    const transformDefaults = { translation, rotation, scale, preRotation, postRotation, rotationPivot, scalingPivot, rotationOffset, scalingOffset, geometricTranslation, geometricRotation, geometricScaling, rotationOrder, inheritType };
+    const propertyNodes = [
+        ...(modelNode.children.find((c) => c.name === "Properties70")?.children ?? []).filter((p) => p.name === "P"),
+        ...(modelNode.children.find((c) => c.name === "Properties60")?.children ?? []).filter((p) => p.name === "Property"),
+    ];
+    if (propertyNodes.length === 0) return transformDefaults;
 
-    for (const p of props70.children) {
-        if (p.name !== "P") continue;
+    for (const p of propertyNodes) {
         const propName = getPropertyValue<string>(p, 0);
         if (!propName) continue;
+        const valueOffset = p.name === "Property" ? 3 : 4;
 
         switch (propName) {
             case "Lcl Translation":
-                translation[0] = toNumber(p.properties[4]?.value) ?? 0;
-                translation[1] = toNumber(p.properties[5]?.value) ?? 0;
-                translation[2] = toNumber(p.properties[6]?.value) ?? 0;
+                translation[0] = toNumber(p.properties[valueOffset]?.value) ?? 0;
+                translation[1] = toNumber(p.properties[valueOffset + 1]?.value) ?? 0;
+                translation[2] = toNumber(p.properties[valueOffset + 2]?.value) ?? 0;
                 break;
             case "Lcl Rotation":
-                rotation[0] = toNumber(p.properties[4]?.value) ?? 0;
-                rotation[1] = toNumber(p.properties[5]?.value) ?? 0;
-                rotation[2] = toNumber(p.properties[6]?.value) ?? 0;
+                rotation[0] = toNumber(p.properties[valueOffset]?.value) ?? 0;
+                rotation[1] = toNumber(p.properties[valueOffset + 1]?.value) ?? 0;
+                rotation[2] = toNumber(p.properties[valueOffset + 2]?.value) ?? 0;
                 break;
             case "Lcl Scaling":
-                scale[0] = toNumber(p.properties[4]?.value) ?? 1;
-                scale[1] = toNumber(p.properties[5]?.value) ?? 1;
-                scale[2] = toNumber(p.properties[6]?.value) ?? 1;
+                scale[0] = toNumber(p.properties[valueOffset]?.value) ?? 1;
+                scale[1] = toNumber(p.properties[valueOffset + 1]?.value) ?? 1;
+                scale[2] = toNumber(p.properties[valueOffset + 2]?.value) ?? 1;
                 break;
             case "PreRotation":
-                preRotation[0] = toNumber(p.properties[4]?.value) ?? 0;
-                preRotation[1] = toNumber(p.properties[5]?.value) ?? 0;
-                preRotation[2] = toNumber(p.properties[6]?.value) ?? 0;
+                preRotation[0] = toNumber(p.properties[valueOffset]?.value) ?? 0;
+                preRotation[1] = toNumber(p.properties[valueOffset + 1]?.value) ?? 0;
+                preRotation[2] = toNumber(p.properties[valueOffset + 2]?.value) ?? 0;
                 break;
             case "PostRotation":
-                postRotation[0] = toNumber(p.properties[4]?.value) ?? 0;
-                postRotation[1] = toNumber(p.properties[5]?.value) ?? 0;
-                postRotation[2] = toNumber(p.properties[6]?.value) ?? 0;
+                postRotation[0] = toNumber(p.properties[valueOffset]?.value) ?? 0;
+                postRotation[1] = toNumber(p.properties[valueOffset + 1]?.value) ?? 0;
+                postRotation[2] = toNumber(p.properties[valueOffset + 2]?.value) ?? 0;
                 break;
             case "RotationPivot":
-                rotationPivot[0] = toNumber(p.properties[4]?.value) ?? 0;
-                rotationPivot[1] = toNumber(p.properties[5]?.value) ?? 0;
-                rotationPivot[2] = toNumber(p.properties[6]?.value) ?? 0;
+                rotationPivot[0] = toNumber(p.properties[valueOffset]?.value) ?? 0;
+                rotationPivot[1] = toNumber(p.properties[valueOffset + 1]?.value) ?? 0;
+                rotationPivot[2] = toNumber(p.properties[valueOffset + 2]?.value) ?? 0;
                 break;
             case "ScalingPivot":
-                scalingPivot[0] = toNumber(p.properties[4]?.value) ?? 0;
-                scalingPivot[1] = toNumber(p.properties[5]?.value) ?? 0;
-                scalingPivot[2] = toNumber(p.properties[6]?.value) ?? 0;
+                scalingPivot[0] = toNumber(p.properties[valueOffset]?.value) ?? 0;
+                scalingPivot[1] = toNumber(p.properties[valueOffset + 1]?.value) ?? 0;
+                scalingPivot[2] = toNumber(p.properties[valueOffset + 2]?.value) ?? 0;
                 break;
             case "RotationOffset":
-                rotationOffset[0] = toNumber(p.properties[4]?.value) ?? 0;
-                rotationOffset[1] = toNumber(p.properties[5]?.value) ?? 0;
-                rotationOffset[2] = toNumber(p.properties[6]?.value) ?? 0;
+                rotationOffset[0] = toNumber(p.properties[valueOffset]?.value) ?? 0;
+                rotationOffset[1] = toNumber(p.properties[valueOffset + 1]?.value) ?? 0;
+                rotationOffset[2] = toNumber(p.properties[valueOffset + 2]?.value) ?? 0;
                 break;
             case "ScalingOffset":
-                scalingOffset[0] = toNumber(p.properties[4]?.value) ?? 0;
-                scalingOffset[1] = toNumber(p.properties[5]?.value) ?? 0;
-                scalingOffset[2] = toNumber(p.properties[6]?.value) ?? 0;
+                scalingOffset[0] = toNumber(p.properties[valueOffset]?.value) ?? 0;
+                scalingOffset[1] = toNumber(p.properties[valueOffset + 1]?.value) ?? 0;
+                scalingOffset[2] = toNumber(p.properties[valueOffset + 2]?.value) ?? 0;
                 break;
             case "GeometricTranslation":
-                geometricTranslation[0] = toNumber(p.properties[4]?.value) ?? 0;
-                geometricTranslation[1] = toNumber(p.properties[5]?.value) ?? 0;
-                geometricTranslation[2] = toNumber(p.properties[6]?.value) ?? 0;
+                geometricTranslation[0] = toNumber(p.properties[valueOffset]?.value) ?? 0;
+                geometricTranslation[1] = toNumber(p.properties[valueOffset + 1]?.value) ?? 0;
+                geometricTranslation[2] = toNumber(p.properties[valueOffset + 2]?.value) ?? 0;
                 break;
             case "GeometricRotation":
-                geometricRotation[0] = toNumber(p.properties[4]?.value) ?? 0;
-                geometricRotation[1] = toNumber(p.properties[5]?.value) ?? 0;
-                geometricRotation[2] = toNumber(p.properties[6]?.value) ?? 0;
+                geometricRotation[0] = toNumber(p.properties[valueOffset]?.value) ?? 0;
+                geometricRotation[1] = toNumber(p.properties[valueOffset + 1]?.value) ?? 0;
+                geometricRotation[2] = toNumber(p.properties[valueOffset + 2]?.value) ?? 0;
                 break;
             case "GeometricScaling":
-                geometricScaling[0] = toNumber(p.properties[4]?.value) ?? 1;
-                geometricScaling[1] = toNumber(p.properties[5]?.value) ?? 1;
-                geometricScaling[2] = toNumber(p.properties[6]?.value) ?? 1;
+                geometricScaling[0] = toNumber(p.properties[valueOffset]?.value) ?? 1;
+                geometricScaling[1] = toNumber(p.properties[valueOffset + 1]?.value) ?? 1;
+                geometricScaling[2] = toNumber(p.properties[valueOffset + 2]?.value) ?? 1;
                 break;
             case "RotationOrder":
-                rotationOrder = toNumber(p.properties[4]?.value) ?? 0;
+                rotationOrder = toNumber(p.properties[valueOffset]?.value) ?? 0;
+                break;
+            case "InheritType":
+                inheritType = toNumber(p.properties[valueOffset]?.value) ?? 1;
                 break;
         }
     }
 
-    return { translation, rotation, scale, preRotation, postRotation, rotationPivot, scalingPivot, rotationOffset, scalingOffset, geometricTranslation, geometricRotation, geometricScaling, rotationOrder };
+    return { translation, rotation, scale, preRotation, postRotation, rotationPivot, scalingPivot, rotationOffset, scalingOffset, geometricTranslation, geometricRotation, geometricScaling, rotationOrder, inheritType };
 }
 
 // ── Global Settings ────────────────────────────────────────────────────────────

@@ -45,14 +45,14 @@ export function extractGeometry(geometryNode: FBXNode, nodeId: bigint): FBXGeome
     if (!verticesNode) {
         throw new Error(`Geometry '${name}' has no Vertices node`);
     }
-    const rawPositions = toFloat64Array(verticesNode.properties[0].value);
+    const rawPositions = toFloat64Array(getNodeArrayValue(verticesNode));
 
     // Extract polygon vertex indices
     const pviNode = findChildByName(geometryNode, "PolygonVertexIndex");
     if (!pviNode) {
         throw new Error(`Geometry '${name}' has no PolygonVertexIndex node`);
     }
-    const rawIndices = toInt32Array(pviNode.properties[0].value);
+    const rawIndices = toInt32Array(getNodeArrayValue(pviNode));
 
     // Parse polygons from the FBX negative-index convention
     const polygons = parsePolygons(rawIndices);
@@ -102,7 +102,7 @@ export function extractGeometry(geometryNode: FBXNode, nodeId: bigint): FBXGeome
     if (smoothingNode) {
         const smoothingDataNode = findChildByName(smoothingNode, "Smoothing");
         if (smoothingDataNode) {
-            smoothingGroups = toInt32Array(smoothingDataNode.properties[0].value);
+            smoothingGroups = toInt32Array(getNodeArrayValue(smoothingDataNode));
         }
     }
 
@@ -251,7 +251,7 @@ function extractMaterialIndices(matNode: FBXNode, polygonCount: number): Int32Ar
     if (mapping === "ByPolygon") {
         const materialsNode = findChildByName(matNode, "Materials");
         if (!materialsNode) return null;
-        const rawIndices = toInt32Array(materialsNode.properties[0].value);
+        const rawIndices = toInt32Array(getNodeArrayValue(materialsNode));
         // For Direct reference, the Materials array has one index per polygon
         if (reference === "Direct" || reference === "IndexToDirect") {
             return rawIndices;
@@ -279,13 +279,13 @@ function expandLayerElement(
 
     const dataNode = findChildByName(layerNode, dataChildName);
     if (!dataNode) return null;
-    const data = toFloat64Array(dataNode.properties[0].value);
+    const data = toFloat64Array(getNodeArrayValue(dataNode));
 
     let indexData: Int32Array | null = null;
     if (reference === "IndexToDirect") {
         const indexNode = findChildByName(layerNode, indexChildName);
         if (indexNode) {
-            indexData = toInt32Array(indexNode.properties[0].value);
+                indexData = toInt32Array(getNodeArrayValue(indexNode));
         }
     }
 
@@ -399,6 +399,11 @@ function toFloat64Array(value: unknown): Float64Array {
     if (value instanceof Float64Array) return value;
     if (value instanceof Float32Array) return new Float64Array(value);
     if (value instanceof Int32Array) return new Float64Array(value);
+    if (Array.isArray(value)) {
+        const result = new Float64Array(value.length);
+        for (let i = 0; i < value.length; i++) result[i] = Number(value[i]);
+        return result;
+    }
     throw new Error(`Cannot convert ${typeof value} to Float64Array`);
 }
 
@@ -418,7 +423,17 @@ function toInt32Array(value: unknown): Int32Array {
         }
         return result;
     }
+    if (Array.isArray(value)) {
+        const result = new Int32Array(value.length);
+        for (let i = 0; i < value.length; i++) result[i] = Math.round(Number(value[i]));
+        return result;
+    }
     throw new Error(`Cannot convert ${typeof value} to Int32Array`);
+}
+
+function getNodeArrayValue(node: FBXNode): unknown {
+    if (node.properties.length === 1) return node.properties[0].value;
+    return node.properties.map((property) => property.value);
 }
 
 

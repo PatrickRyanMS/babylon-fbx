@@ -448,39 +448,28 @@ export class FBXFileLoader implements ISceneLoaderPluginAsync {
         // Convert Float64Array to Float32Array for Babylon
         const positions = float64To32(geomData.positions);
 
-        // Apply GeometricTranslation — affects only this mesh's geometry, not children
         const gt = model.geometricTranslation;
-        if (gt[0] !== 0 || gt[1] !== 0 || gt[2] !== 0) {
-            for (let i = 0; i < positions.length; i += 3) {
-                positions[i] += gt[0];
-                positions[i + 1] += gt[1];
-                positions[i + 2] += gt[2];
-            }
-        }
-
-        // Apply GeometricRotation if present
         const gr = model.geometricRotation;
-        if (gr[0] !== 0 || gr[1] !== 0 || gr[2] !== 0) {
-            const d2r = Math.PI / 180;
-            const geoRotMatrix = FBXFileLoader._eulerToMatrixXYZ(gr[0] * d2r, gr[1] * d2r, gr[2] * d2r);
+        const gs = model.geometricScaling;
+
+        // Geometric transforms affect only this mesh's geometry, not children.
+        // Blender composes them as T * R * S; Babylon's row-vector equivalent is S * R * T.
+        const geometricPositionMatrix = FBXFileLoader._computeFBXGeometricMatrix(gt, gr, gs);
+        const geometricDeltaMatrix = FBXFileLoader._computeFBXGeometricDeltaMatrix(gr, gs);
+        const geometricNormalMatrix = FBXFileLoader._computeFBXGeometricNormalMatrix(gr, gs);
+        const hasGeometricPositionTransform = !geometricPositionMatrix.equals(Matrix.Identity());
+        const hasGeometricDeltaTransform = !geometricDeltaMatrix.equals(Matrix.Identity());
+        const hasGeometricNormalTransform = !geometricNormalMatrix.equals(Matrix.Identity());
+
+        if (hasGeometricPositionTransform) {
             for (let i = 0; i < positions.length; i += 3) {
                 const v = Vector3.TransformCoordinates(
                     new Vector3(positions[i], positions[i + 1], positions[i + 2]),
-                    geoRotMatrix
+                    geometricPositionMatrix
                 );
                 positions[i] = v.x;
                 positions[i + 1] = v.y;
                 positions[i + 2] = v.z;
-            }
-        }
-
-        // Apply GeometricScaling if present
-        const gs = model.geometricScaling;
-        if (gs[0] !== 1 || gs[1] !== 1 || gs[2] !== 1) {
-            for (let i = 0; i < positions.length; i += 3) {
-                positions[i] *= gs[0];
-                positions[i + 1] *= gs[1];
-                positions[i + 2] *= gs[2];
             }
         }
 
@@ -494,15 +483,15 @@ export class FBXFileLoader implements ISceneLoaderPluginAsync {
 
         if (geomData.normals) {
             const normals = float64To32(geomData.normals);
-            // Apply geometric rotation to normals if present
-            if (gr[0] !== 0 || gr[1] !== 0 || gr[2] !== 0) {
-                const d2r = Math.PI / 180;
-                const geoRotMatrix = FBXFileLoader._eulerToMatrixXYZ(gr[0] * d2r, gr[1] * d2r, gr[2] * d2r);
+            if (hasGeometricNormalTransform) {
                 for (let i = 0; i < normals.length; i += 3) {
                     const n = Vector3.TransformNormal(
                         new Vector3(normals[i], normals[i + 1], normals[i + 2]),
-                        geoRotMatrix
+                        geometricNormalMatrix
                     );
+                    if (n.lengthSquared() > 0) {
+                        n.normalize();
+                    }
                     normals[i] = n.x;
                     normals[i + 1] = n.y;
                     normals[i + 2] = n.z;
@@ -546,13 +535,24 @@ export class FBXFileLoader implements ISceneLoaderPluginAsync {
 
         // Apply bone weights if we have a skin
         if (skeleton && skin) {
-            const { matricesIndices, matricesWeights } = this._buildSkinningData(
+            const {
+                matricesIndices,
+                matricesWeights,
+                matricesIndicesExtra,
+                matricesWeightsExtra,
+                numBoneInfluencers,
+            } = this._buildSkinningData(
                 geomData,
                 skin,
                 skinBinding
             );
             vertexData.matricesIndices = matricesIndices;
             vertexData.matricesWeights = matricesWeights;
+            if (matricesIndicesExtra && matricesWeightsExtra) {
+                vertexData.matricesIndicesExtra = matricesIndicesExtra;
+                vertexData.matricesWeightsExtra = matricesWeightsExtra;
+            }
+            mesh.numBoneInfluencers = numBoneInfluencers;
         }
 
         vertexData.applyToMesh(mesh);
@@ -562,10 +562,10 @@ export class FBXFileLoader implements ISceneLoaderPluginAsync {
             ...(mesh.metadata as object ?? {}),
             fbxGeometryId: geomData.id,
             fbxControlPointIndices: geomData.controlPointIndices,
-            // Store geometric rotation for morph delta alignment (vertex-level only)
-            fbxPreRotMatrix: (gr[0] !== 0 || gr[1] !== 0 || gr[2] !== 0)
-                ? FBXFileLoader._eulerToMatrixXYZ(gr[0] * Math.PI / 180, gr[1] * Math.PI / 180, gr[2] * Math.PI / 180)
-                : null,
+            fbxGeometryDeltaMatrix: hasGeometricDeltaTransform ? geometricDeltaMatrix : null,
+            fbxGeometryNormalMatrix: hasGeometricNormalTransform ? geometricNormalMatrix : null,
+            // Back-compat for existing morph delta handling metadata.
+            fbxPreRotMatrix: hasGeometricDeltaTransform ? geometricDeltaMatrix : null,
         };
 
         if (skeleton) {
@@ -734,7 +734,13 @@ export class FBXFileLoader implements ISceneLoaderPluginAsync {
         geomData: FBXGeometryData,
         skin: FBXSkinData,
         skinBinding?: FBXSkinBindingData
-    ): { matricesIndices: Float32Array; matricesWeights: Float32Array } {
+    ): {
+        matricesIndices: Float32Array;
+        matricesWeights: Float32Array;
+        matricesIndicesExtra: Float32Array | null;
+        matricesWeightsExtra: Float32Array | null;
+        numBoneInfluencers: number;
+    } {
         // The positions array is per-polygon-vertex (already expanded).
         // We need to figure out the control point index for each polygon vertex.
         // The geometry stores positions per polygon-vertex, so geomData.positions.length/3
@@ -756,14 +762,33 @@ export class FBXFileLoader implements ISceneLoaderPluginAsync {
         const vertexCount = geomData.positions.length / 3;
         const matricesIndices = new Float32Array(vertexCount * 4);
         const matricesWeights = new Float32Array(vertexCount * 4);
+        let matricesIndicesExtra: Float32Array | null = null;
+        let matricesWeightsExtra: Float32Array | null = null;
+        let numBoneInfluencers = 0;
 
         if (geomData.controlPointIndices) {
             for (let i = 0; i < vertexCount; i++) {
                 const cpIdx = geomData.controlPointIndices[i];
                 const boneIdx = skin.boneIndices[cpIdx] ?? [];
+                numBoneInfluencers = Math.max(numBoneInfluencers, Math.min(boneIdx.length, 8));
+            }
+
+            if (numBoneInfluencers > 4) {
+                matricesIndicesExtra = new Float32Array(vertexCount * 4);
+                matricesWeightsExtra = new Float32Array(vertexCount * 4);
+            }
+
+            for (let i = 0; i < vertexCount; i++) {
+                const cpIdx = geomData.controlPointIndices[i];
+                const boneIdx = skin.boneIndices[cpIdx] ?? [];
                 const boneWts = skin.boneWeights[cpIdx] ?? [];
 
-                for (let j = 0; j < 4; j++) {
+                for (let j = 0; j < 8; j++) {
+                    const indicesBuffer = j < 4 ? matricesIndices : matricesIndicesExtra;
+                    const weightsBuffer = j < 4 ? matricesWeights : matricesWeightsExtra;
+                    if (!indicesBuffer || !weightsBuffer) continue;
+
+                    const bufferIndex = i * 4 + (j % 4);
                     if (j < boneIdx.length) {
                         const skinBoneIndex = boneIdx[j];
                         const rigBoneIndex = skinBinding
@@ -772,16 +797,22 @@ export class FBXFileLoader implements ISceneLoaderPluginAsync {
                         if (rigBoneIndex === undefined || rigBoneIndex < 0) {
                             throw new Error(`FBXFileLoader: missing rig bone mapping for skin bone index ${skinBoneIndex}`);
                         }
-                        matricesIndices[i * 4 + j] = rigBoneIndex;
+                        indicesBuffer[bufferIndex] = rigBoneIndex;
                     } else {
-                        matricesIndices[i * 4 + j] = 0;
+                        indicesBuffer[bufferIndex] = 0;
                     }
-                    matricesWeights[i * 4 + j] = j < boneWts.length ? boneWts[j] : 0;
+                    weightsBuffer[bufferIndex] = j < boneWts.length ? boneWts[j] : 0;
                 }
             }
         }
 
-        return { matricesIndices, matricesWeights };
+        return {
+            matricesIndices,
+            matricesWeights,
+            matricesIndicesExtra,
+            matricesWeightsExtra,
+            numBoneInfluencers: Math.max(numBoneInfluencers, 1),
+        };
     }
 
     private _createMaterial(
@@ -857,7 +888,7 @@ export class FBXFileLoader implements ISceneLoaderPluginAsync {
                 } else {
                     continue;
                 }
-                texture = new Texture(texturePath, scene);
+                texture = FBXFileLoader._createExternalTexture(texturePath, scene);
             }
 
             switch (tex.propertyName) {
@@ -925,6 +956,40 @@ export class FBXFileLoader implements ISceneLoaderPluginAsync {
         return material;
     }
 
+    private static _createExternalTexture(texturePath: string, scene: Scene): Texture {
+        const fallbackUrls = FBXFileLoader._buildTextureFallbackUrls(texturePath);
+        let fallbackIndex = 0;
+        let texture: Texture;
+        texture = new Texture(
+            texturePath,
+            scene,
+            undefined,
+            undefined,
+            undefined,
+            undefined,
+            () => {
+                const fallbackUrl = fallbackUrls[fallbackIndex++];
+                if (fallbackUrl) {
+                    texture.updateURL(fallbackUrl);
+                }
+            }
+        );
+        return texture;
+    }
+
+    private static _buildTextureFallbackUrls(texturePath: string): string[] {
+        const slashIndex = Math.max(texturePath.lastIndexOf("/"), texturePath.lastIndexOf("\\"));
+        const dotIndex = texturePath.lastIndexOf(".");
+        if (dotIndex <= slashIndex) return [];
+
+        const basePath = texturePath.slice(0, dotIndex);
+        const currentExtension = texturePath.slice(dotIndex + 1).toLowerCase();
+        const extensionFallbacks = ["png", "jpg", "jpeg", "webp", "bmp", "tga"];
+        return extensionFallbacks
+            .filter((extension) => extension !== currentExtension)
+            .map((extension) => `${basePath}.${extension}`);
+    }
+
     /** Guess MIME type from file extension */
     private static _guessMimeType(fileName: string): string {
         const ext = fileName.toLowerCase().split(".").pop() ?? "";
@@ -966,7 +1031,11 @@ export class FBXFileLoader implements ISceneLoaderPluginAsync {
             const morphTargetManager = new MorphTargetManager(scene);
             morphTargetManager.optimizeInfluencers = false;
             // Get preRotation matrix if the mesh had its positions baked
-            const preRotMatrix = (mesh.metadata as { fbxPreRotMatrix?: Matrix | null } | undefined)?.fbxPreRotMatrix ?? null;
+            const deltaMatrix = (mesh.metadata as { fbxGeometryDeltaMatrix?: Matrix | null; fbxPreRotMatrix?: Matrix | null } | undefined)?.fbxGeometryDeltaMatrix
+                ?? (mesh.metadata as { fbxPreRotMatrix?: Matrix | null } | undefined)?.fbxPreRotMatrix
+                ?? null;
+            const normalMatrix = (mesh.metadata as { fbxGeometryNormalMatrix?: Matrix | null } | undefined)?.fbxGeometryNormalMatrix
+                ?? deltaMatrix;
 
             for (const channel of bs.channels) {
                 // Use the first shape (in-between shapes not yet supported)
@@ -1015,9 +1084,8 @@ export class FBXFileLoader implements ISceneLoaderPluginAsync {
                     let dy = shape.vertices[shapeIdx * 3 + 1];
                     let dz = shape.vertices[shapeIdx * 3 + 2];
 
-                    // Rotate delta by the same preRotation applied to base positions
-                    if (preRotMatrix) {
-                        const rv = Vector3.TransformNormal(new Vector3(dx, dy, dz), preRotMatrix);
+                    if (deltaMatrix) {
+                        const rv = Vector3.TransformNormal(new Vector3(dx, dy, dz), deltaMatrix);
                         dx = rv.x; dy = rv.y; dz = rv.z;
                     }
 
@@ -1037,8 +1105,11 @@ export class FBXFileLoader implements ISceneLoaderPluginAsync {
                         let nx = shape.normals[shapeIdx * 3];
                         let ny = shape.normals[shapeIdx * 3 + 1];
                         let nz = shape.normals[shapeIdx * 3 + 2];
-                        if (preRotMatrix) {
-                            const rn = Vector3.TransformNormal(new Vector3(nx, ny, nz), preRotMatrix);
+                        if (normalMatrix) {
+                            const rn = Vector3.TransformNormal(new Vector3(nx, ny, nz), normalMatrix);
+                            if (rn.lengthSquared() > 0) {
+                                rn.normalize();
+                            }
                             nx = rn.x; ny = rn.y; nz = rn.z;
                         }
                         targetNormals[vi * 3] += nx;
@@ -1229,6 +1300,39 @@ export class FBXFileLoader implements ISceneLoaderPluginAsync {
             case 5: return mz.multiply(my).multiply(mx); // ZYX
             default: return mx.multiply(my).multiply(mz); // fallback to XYZ
         }
+    }
+
+    private static _computeFBXGeometricMatrix(
+        translation: [number, number, number],
+        rotation: [number, number, number],
+        scale: [number, number, number]
+    ): Matrix {
+        const translationM = Matrix.Translation(translation[0], translation[1], translation[2]);
+        return FBXFileLoader._computeFBXGeometricDeltaMatrix(rotation, scale).multiply(translationM);
+    }
+
+    private static _computeFBXGeometricDeltaMatrix(
+        rotation: [number, number, number],
+        scale: [number, number, number]
+    ): Matrix {
+        const d2r = Math.PI / 180;
+        const scaleM = Matrix.Scaling(scale[0], scale[1], scale[2]);
+        const rotationM = FBXFileLoader._eulerToMatrixXYZ(rotation[0] * d2r, rotation[1] * d2r, rotation[2] * d2r);
+        return scaleM.multiply(rotationM);
+    }
+
+    private static _computeFBXGeometricNormalMatrix(
+        rotation: [number, number, number],
+        scale: [number, number, number]
+    ): Matrix {
+        const d2r = Math.PI / 180;
+        const inverseScaleM = Matrix.Scaling(
+            scale[0] === 0 ? 0 : 1 / scale[0],
+            scale[1] === 0 ? 0 : 1 / scale[1],
+            scale[2] === 0 ? 0 : 1 / scale[2]
+        );
+        const rotationM = FBXFileLoader._eulerToMatrixXYZ(rotation[0] * d2r, rotation[1] * d2r, rotation[2] * d2r);
+        return inverseScaleM.multiply(rotationM);
     }
 
     /**

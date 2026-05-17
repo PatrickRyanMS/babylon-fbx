@@ -305,8 +305,10 @@ function createFallbackBone(modelId: bigint, objectMap: FBXObjectMap): FBXBoneDa
         scalingOffset: transform.scalingOffset,
         scale: transform.scale,
         rotationOrder: transform.rotationOrder,
+        inheritType: transform.inheritType,
         bindPoseMatrix: null,
         transformLinkMatrix: null,
+        transformAssociateModelMatrix: null,
         modelBindPoseMatrix: null,
     };
 }
