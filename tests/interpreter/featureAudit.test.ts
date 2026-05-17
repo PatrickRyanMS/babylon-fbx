@@ -92,11 +92,12 @@ describe("FBX feature audit fixtures", () => {
         expect(scene.rootModels.some((model) => model.geometry || model.children.some((child) => child.geometry))).toBe(true);
     });
 
-    it("parses InheritType without changing runtime transform behavior", () => {
+    it("parses non-default InheritType and surfaces runtime-gated diagnostics", () => {
         expect(countNonDefaultInheritTypes(aishaPath)).toBe(307);
         expect(countNonDefaultInheritTypes(spiderPath)).toBe(47);
         expect(countNonDefaultInheritTypes(behemotPath)).toBe(2);
         expect(countNonDefaultInheritTypes(strongholdPath)).toBe(0);
+        expect(countNonDefaultInheritTypeDiagnostics(behemotPath)).toBe(2);
     });
 });
 
@@ -159,6 +160,14 @@ function getInt32ArrayChild(node: FBXNode, childName: string): Int32Array | null
 function countNonDefaultInheritTypes(path: string): number {
     const scene = interpretFBX(loadDocument(path));
     return collectModels(scene.rootModels).filter((model) => model.inheritType !== 1).length;
+}
+
+function countNonDefaultInheritTypeDiagnostics(path: string): number {
+    const scene = interpretFBX(loadDocument(path));
+    return collectModels(scene.rootModels).filter((model) =>
+        model.inheritType !== 1 &&
+        model.diagnostics.some((diagnostic) => diagnostic.includes("InheritType"))
+    ).length;
 }
 
 function collectModels(models: ReturnType<typeof interpretFBX>["rootModels"]): ReturnType<typeof interpretFBX>["rootModels"] {

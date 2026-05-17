@@ -13,6 +13,13 @@ export interface FBXShapeData {
     normals: Float64Array | null;
 }
 
+export interface FBXBlendShapeDiagnostic {
+    type: "full-weights-mismatch" | "missing-full-weights";
+    message: string;
+    channelId: bigint;
+    channelName: string;
+}
+
 /** A blend shape channel (one animatable morph target) */
 export interface FBXBlendShapeChannelData {
     /** Channel name */
@@ -23,6 +30,10 @@ export interface FBXBlendShapeChannelData {
     deformPercent: number;
     /** Shape geometry (typically one per channel, but FBX supports in-between shapes) */
     shapes: FBXShapeData[];
+    /** In-between full weights in FBX DeformPercent units (0-100), one per shape when present */
+    fullWeights: number[] | null;
+    /** Recoverable blend-shape diagnostics */
+    diagnostics: FBXBlendShapeDiagnostic[];
 }
 
 /** A blend shape deformer attached to a geometry */
@@ -90,8 +101,7 @@ function extractBlendShape(
             }
         }
 
-        // Also check for FullWeights node (contains target weights for in-between shapes)
-        // For now we just extract shapes
+        const rawFullWeights = extractFullWeights(channelNode);
 
         // Find connected Shape geometries
         const shapes: FBXShapeData[] = [];
@@ -106,11 +116,15 @@ function extractBlendShape(
         }
 
         if (shapes.length > 0) {
+            const diagnostics: FBXBlendShapeDiagnostic[] = [];
+            const fullWeights = normalizeFullWeights(rawFullWeights, shapes, channelId, channelName, diagnostics);
             channels.push({
                 name: channelName,
                 id: channelId,
                 deformPercent,
-                shapes,
+                shapes: sortShapesByFullWeight(shapes, fullWeights),
+                fullWeights: fullWeights ? [...fullWeights].sort((a, b) => a - b) : null,
+                diagnostics,
             });
         }
     }
@@ -122,6 +136,60 @@ function extractBlendShape(
         geometryId,
         channels,
     };
+}
+
+function extractFullWeights(channelNode: FBXNode): number[] | null {
+    const fullWeightsNode = findChildByName(channelNode, "FullWeights");
+    const rawFullWeights = fullWeightsNode?.properties[0]?.value;
+    if (!rawFullWeights) return null;
+
+    if (rawFullWeights instanceof Float64Array || rawFullWeights instanceof Float32Array || rawFullWeights instanceof Int32Array) {
+        return Array.from(rawFullWeights, (value) => Number(value));
+    }
+    return null;
+}
+
+function normalizeFullWeights(
+    fullWeights: number[] | null,
+    shapes: FBXShapeData[],
+    channelId: bigint,
+    channelName: string,
+    diagnostics: FBXBlendShapeDiagnostic[]
+): number[] | null {
+    if (!fullWeights) {
+        if (shapes.length > 1) {
+            diagnostics.push({
+                type: "missing-full-weights",
+                message: "Blend shape channel has multiple shapes but no FullWeights; using the first shape for compatibility.",
+                channelId,
+                channelName,
+            });
+        }
+        return null;
+    }
+
+    if (fullWeights.length !== shapes.length) {
+        diagnostics.push({
+            type: "full-weights-mismatch",
+            message: `FullWeights length ${fullWeights.length} does not match shape count ${shapes.length}; using the first shape for compatibility.`,
+            channelId,
+            channelName,
+        });
+        return null;
+    }
+
+    return fullWeights;
+}
+
+function sortShapesByFullWeight(shapes: FBXShapeData[], fullWeights: number[] | null): FBXShapeData[] {
+    if (!fullWeights || fullWeights.length !== shapes.length) {
+        return shapes.length > 1 ? [shapes[0]] : shapes;
+    }
+
+    return shapes
+        .map((shape, index) => ({ shape, weight: fullWeights[index] }))
+        .sort((a, b) => a.weight - b.weight)
+        .map((entry) => entry.shape);
 }
 
 function extractShape(shapeNode: FBXNode): FBXShapeData | null {

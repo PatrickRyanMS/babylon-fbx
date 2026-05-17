@@ -5,6 +5,21 @@ import { getChildren } from "./connections.js";
 
 const MAX_BONE_INFLUENCES = 8;
 
+export type FBXClusterMode = "Normalize" | "Additive" | "TotalOne" | "Unknown";
+
+export interface FBXSkinDiagnostic {
+    type:
+        | "cluster-mode-runtime-unsupported"
+        | "missing-cluster-transform"
+        | "missing-cluster-transform-link"
+        | "missing-bind-pose-matrix"
+        | "associate-model-present";
+    message: string;
+    boneModelId?: bigint;
+    boneName?: string;
+    clusterMode?: FBXClusterMode;
+}
+
 /** Represents a single bone (cluster) in the FBX skeleton */
 export interface FBXBoneData {
     /** The Model node ID for this bone */
@@ -39,6 +54,8 @@ export interface FBXBoneData {
     rotationOrder: number;
     /** FBX transform inheritance mode. 0=RrSs, 1=RSrs, 2=Rrs */
     inheritType: number;
+    /** Cluster skinning mode */
+    clusterMode: FBXClusterMode;
     /** Bind pose transform matrix (cluster Transform, 4x4) */
     bindPoseMatrix: Float64Array | null;
     /** Bone's world transform at bind time (cluster TransformLink, 4x4) */
@@ -47,6 +64,8 @@ export interface FBXBoneData {
     transformAssociateModelMatrix: Float64Array | null;
     /** Model's absolute matrix from the FBX BindPose, when present */
     modelBindPoseMatrix: Float64Array | null;
+    /** Recoverable bind/skinning diagnostics for this bone */
+    diagnostics: FBXSkinDiagnostic[];
 }
 
 /** Represents a skin deformer with its clusters */
@@ -55,12 +74,16 @@ export interface FBXSkinData {
     id: bigint;
     /** Geometry ID this skin is attached to */
     geometryId: bigint;
+    /** Mesh model world matrix from the FBX BindPose, when present */
+    meshBindPoseMatrix: Float64Array | null;
     /** Bones in this skeleton */
     bones: FBXBoneData[];
     /** Per-vertex bone indices, sorted by descending weight and capped for Babylon skinning */
     boneIndices: number[][];
     /** Per-vertex bone weights, matching boneIndices */
     boneWeights: number[][];
+    /** Recoverable skinning/bind diagnostics */
+    diagnostics: FBXSkinDiagnostic[];
 }
 
 /**
@@ -93,6 +116,9 @@ function extractSkin(
     const geometryId = skinParent.id;
     const geometryNode = objectMap.objects.get(geometryId);
     if (!geometryNode || geometryNode.name !== "Geometry") return null;
+    const modelParent = objectMap.parentOf.get(geometryId);
+    const modelParentNode = modelParent ? objectMap.objects.get(modelParent.id) : undefined;
+    const meshModelId = modelParentNode?.name === "Model" ? modelParent!.id : undefined;
 
     // Find all clusters (children of this skin)
     const clusterEntries = getChildren(objectMap, skinId, "Deformer");
@@ -117,7 +143,8 @@ function extractSkin(
     // rigs (for example 3ds Max Biped) animate a non-cluster root above the
     // clustered bones.
     const bindPoseMatrices = extractBindPoseMatrices(geometryId, objectMap);
-    const bones = buildBoneHierarchy(boneModelMap, bindPoseMatrices, objectMap);
+    const skinDiagnostics: FBXSkinDiagnostic[] = [];
+    const bones = buildBoneHierarchy(boneModelMap, bindPoseMatrices, objectMap, skinDiagnostics);
     if (bones.length === 0) return null;
 
     // Extract per-vertex weights from clusters
@@ -130,9 +157,11 @@ function extractSkin(
     return {
         id: skinId,
         geometryId,
+        meshBindPoseMatrix: meshModelId !== undefined ? bindPoseMatrices.get(meshModelId) ?? null : null,
         bones,
         boneIndices,
         boneWeights,
+        diagnostics: skinDiagnostics,
     };
 }
 
@@ -142,7 +171,8 @@ function extractSkin(
 function buildBoneHierarchy(
     boneModelMap: Map<bigint, { clusterId: bigint; clusterNode: FBXNode }>,
     bindPoseMatrices: Map<bigint, Float64Array>,
-    objectMap: FBXObjectMap
+    objectMap: FBXObjectMap,
+    skinDiagnostics: FBXSkinDiagnostic[]
 ): FBXBoneData[] {
     const bones: FBXBoneData[] = [];
     const visited = new Set<bigint>();
@@ -170,9 +200,20 @@ function buildBoneHierarchy(
 
         const clusterInfo = boneModelMap.get(modelId);
         const transform = extractBoneTransform(modelNode);
-        const { bindPoseMatrix, transformLinkMatrix, transformAssociateModelMatrix } = clusterInfo
+        const { bindPoseMatrix, transformLinkMatrix, transformAssociateModelMatrix, clusterMode } = clusterInfo
             ? extractClusterMatrices(clusterInfo.clusterNode)
-            : { bindPoseMatrix: null, transformLinkMatrix: null, transformAssociateModelMatrix: null };
+            : { bindPoseMatrix: null, transformLinkMatrix: null, transformAssociateModelMatrix: null, clusterMode: "Unknown" as const };
+        const diagnostics = createBoneDiagnostics(
+            modelId,
+            cleanFBXName(getPropertyValue<string>(modelNode, 1) ?? `Bone${boneIndex}`),
+            clusterInfo !== undefined,
+            clusterMode,
+            bindPoseMatrix,
+            transformLinkMatrix,
+            transformAssociateModelMatrix,
+            bindPoseMatrices.get(modelId) ?? null
+        );
+        skinDiagnostics.push(...diagnostics);
 
         bones.push({
             modelId,
@@ -191,10 +232,12 @@ function buildBoneHierarchy(
             scale: transform.scale,
             rotationOrder: transform.rotationOrder,
             inheritType: transform.inheritType,
+            clusterMode,
             bindPoseMatrix,
             transformLinkMatrix,
             transformAssociateModelMatrix,
             modelBindPoseMatrix: bindPoseMatrices.get(modelId) ?? null,
+            diagnostics,
         });
 
         for (const childId of childrenByModelId.get(modelId) ?? []) {
@@ -412,10 +455,12 @@ function extractClusterMatrices(clusterNode: FBXNode): {
     bindPoseMatrix: Float64Array | null;
     transformLinkMatrix: Float64Array | null;
     transformAssociateModelMatrix: Float64Array | null;
+    clusterMode: FBXClusterMode;
 } {
     let bindPoseMatrix: Float64Array | null = null;
     let transformLinkMatrix: Float64Array | null = null;
     let transformAssociateModelMatrix: Float64Array | null = null;
+    let clusterMode: FBXClusterMode = "Normalize";
 
     const transformNode = findChildByName(clusterNode, "Transform");
     if (transformNode && transformNode.properties[0]) {
@@ -447,7 +492,77 @@ function extractClusterMatrices(clusterNode: FBXNode): {
         }
     }
 
-    return { bindPoseMatrix, transformLinkMatrix, transformAssociateModelMatrix };
+    const modeNode = findChildByName(clusterNode, "Mode");
+    const mode = modeNode ? getPropertyValue<string>(modeNode, 0) : undefined;
+    if (mode === "Normalize" || mode === "Additive" || mode === "TotalOne") {
+        clusterMode = mode;
+    } else if (mode) {
+        clusterMode = "Unknown";
+    }
+
+    return { bindPoseMatrix, transformLinkMatrix, transformAssociateModelMatrix, clusterMode };
+}
+
+function createBoneDiagnostics(
+    modelId: bigint,
+    boneName: string,
+    isCluster: boolean,
+    clusterMode: FBXClusterMode,
+    bindPoseMatrix: Float64Array | null,
+    transformLinkMatrix: Float64Array | null,
+    transformAssociateModelMatrix: Float64Array | null,
+    modelBindPoseMatrix: Float64Array | null
+): FBXSkinDiagnostic[] {
+    if (!isCluster) return [];
+
+    const diagnostics: FBXSkinDiagnostic[] = [];
+    if (clusterMode === "Additive" || clusterMode === "TotalOne") {
+        diagnostics.push({
+            type: "cluster-mode-runtime-unsupported",
+            message: `Cluster mode '${clusterMode}' is preserved but not applied by Babylon linear blend skinning.`,
+            boneModelId: modelId,
+            boneName,
+            clusterMode,
+        });
+    }
+    if (!bindPoseMatrix) {
+        diagnostics.push({
+            type: "missing-cluster-transform",
+            message: "Cluster is missing Transform matrix; falling back to rest/bind-pose data.",
+            boneModelId: modelId,
+            boneName,
+            clusterMode,
+        });
+    }
+    if (!transformLinkMatrix) {
+        diagnostics.push({
+            type: "missing-cluster-transform-link",
+            message: "Cluster is missing TransformLink matrix; falling back to model bind pose or rest transform.",
+            boneModelId: modelId,
+            boneName,
+            clusterMode,
+        });
+    }
+    if (!modelBindPoseMatrix) {
+        diagnostics.push({
+            type: "missing-bind-pose-matrix",
+            message: "No BindPose matrix was found for this bone model.",
+            boneModelId: modelId,
+            boneName,
+            clusterMode,
+        });
+    }
+    if (transformAssociateModelMatrix) {
+        diagnostics.push({
+            type: "associate-model-present",
+            message: "TransformAssociateModel is preserved for future associate-model skinning semantics.",
+            boneModelId: modelId,
+            boneName,
+            clusterMode,
+        });
+    }
+
+    return diagnostics;
 }
 
 /**

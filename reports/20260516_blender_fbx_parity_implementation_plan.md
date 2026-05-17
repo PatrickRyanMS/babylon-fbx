@@ -299,6 +299,8 @@ Exit criteria:
 
 Purpose: close Blender gaps for non-mesh scene content when assets require it.
 
+Status: completed for the safe runtime subset. Cameras/lights now use property-template fallback, preserve focal length/filmback/orthographic/roll and attenuation/spot/shadow metadata, map orthographic camera bounds when safe, and keep spot `InnerAngle` diagnostic/metadata separate from Babylon's outer cone angle.
+
 Tasks:
 1. Extend camera node attributes:
    - projection/orthographic mode,
@@ -325,6 +327,8 @@ Exit criteria:
 
 Purpose: handle complex DCC helper relationships only when fixtures require them.
 
+Status: completed as diagnostics-first support. Unsupported constraints, helper/control objects, layered textures, non-bind poses, unsupported deformers, unsupported node attributes, and connection-graph issues are surfaced in interpreted scene diagnostics; runtime constraint evaluation remains fixture-driven and intentionally deferred.
+
 Tasks:
 1. Inventory constraint/deformer/helper object types present in fixtures.
 2. Add data-only extraction and diagnostics first.
@@ -350,6 +354,10 @@ Exit criteria:
 11. Phase 9: Camera/light fidelity.
 12. Phase 10: Constraints/helpers.
 
+## Deferred parity gates completion
+
+Status: completed as gated diagnostics. Non-default `InheritType` is preserved and surfaced on model diagnostics/metadata while runtime parent-scale inheritance remains unchanged until a fixture-specific visual baseline exists. Unsupported-only animation stacks, such as visibility/camera/light property animation without TRS curves, are now preserved with curve/default diagnostics instead of being dropped. Constraint runtime evaluation remains explicitly fixture-driven; current support keeps those relationships visible through diagnostics rather than applying speculative transforms.
+
 ## Immediate next candidate work
 
-The next safest implementation step is Phase -1 plus Phase 0: add inventory and diagnostics without changing runtime behavior. That gives every later Blender-parity change a measurable gate and reduces the risk of breaking the current reliable restore point.
+The roadmap phases are now implemented through the diagnostic/runtime-safe subset. Any further work should be fixture-driven runtime expansion: parent-scale `InheritType` composition with a visual baseline, concrete constraint evaluation for a known affected asset, or runtime application of non-TRS animation such as visibility/camera/light curves after adding dedicated gates.

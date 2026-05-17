@@ -7,6 +7,16 @@ import { extractSkins, type FBXSkinData } from "./skeleton.js";
 import { resolveRigs, type FBXRigData } from "./rig.js";
 import { extractAnimations, type FBXAnimationStackData } from "./animation.js";
 import { extractBlendShapes, type FBXBlendShapeData } from "./blendShapes.js";
+import { extractSceneDiagnostics, type FBXSceneDiagnostic } from "./sceneDiagnostics.js";
+import {
+    extractPropertyTemplates,
+    getPropertyTemplate,
+    resolveNumberProperty,
+    resolvePropertyValue,
+    resolveVector3Property,
+    type FBXPropertyTemplate,
+    type FBXPropertyTemplateMap,
+} from "./propertyTemplates.js";
 
 /** Represents a model (transform node) in the FBX scene */
 export interface FBXModelData {
@@ -47,6 +57,8 @@ export interface FBXModelData {
     cullingOff: boolean;
     /** User-defined custom properties from Properties70 */
     customProperties?: Record<string, string | number | boolean>;
+    /** Recoverable model import diagnostics */
+    diagnostics: string[];
 }
 
 /** Camera data extracted from FBX */
@@ -63,6 +75,22 @@ export interface FBXCameraData {
     farPlane: number;
     /** Aspect ratio (width/height), 0 = use viewport */
     aspectRatio: number;
+    /** Projection type */
+    projectionType: "perspective" | "orthographic";
+    /** Focal length in millimeters when present */
+    focalLength?: number;
+    /** Filmback width in inches when present */
+    filmWidth?: number;
+    /** Filmback height in inches when present */
+    filmHeight?: number;
+    /** Orthographic zoom/height when present */
+    orthoZoom?: number;
+    /** Camera roll in degrees when present */
+    roll?: number;
+    /** Known unsupported or unrecognized camera properties */
+    unknownProperties: string[];
+    /** Recoverable camera import diagnostics */
+    diagnostics: string[];
 }
 
 /** Light data extracted from FBX */
@@ -81,6 +109,22 @@ export interface FBXLightData {
     coneAngle: number;
     /** Decay type: 0=None, 1=Linear, 2=Quadratic */
     decayType: number;
+    /** Inner cone angle in degrees for spot lights */
+    innerAngle?: number;
+    /** Outer cone angle in degrees for spot lights */
+    outerAngle?: number;
+    /** Distance at which FBX attenuation starts; preserved as metadata */
+    decayStart?: number;
+    /** Whether FBX near attenuation is enabled */
+    enableNearAttenuation?: boolean;
+    /** Whether FBX far attenuation is enabled */
+    enableFarAttenuation?: boolean;
+    /** Whether the source light requested shadow casting */
+    castShadows?: boolean;
+    /** Known unsupported or unrecognized light properties */
+    unknownProperties: string[];
+    /** Recoverable light import diagnostics */
+    diagnostics: string[];
 }
 
 /** Result of interpreting an FBX document */
@@ -103,6 +147,8 @@ export interface FBXSceneData {
     cameras: FBXCameraData[];
     /** Lights */
     lights: FBXLightData[];
+    /** Scene-level unsupported feature diagnostics */
+    diagnostics: FBXSceneDiagnostic[];
     /** Global settings */
     upAxis: number;
     upAxisSign: number;
@@ -118,6 +164,7 @@ export interface FBXSceneData {
  */
 export function interpretFBX(doc: FBXDocument): FBXSceneData {
     const objectMap = resolveConnections(doc);
+    const propertyTemplates = extractPropertyTemplates(doc);
 
     // Extract global settings
     const globalSettings = extractGlobalSettings(doc);
@@ -126,7 +173,7 @@ export function interpretFBX(doc: FBXDocument): FBXSceneData {
     const materials: FBXMaterialData[] = [];
     for (const [id, node] of objectMap.objects) {
         if (node.name === "Material") {
-            materials.push(extractMaterial(node, id, objectMap));
+            materials.push(extractMaterial(node, id, objectMap, propertyTemplates));
         }
     }
 
@@ -152,11 +199,12 @@ export function interpretFBX(doc: FBXDocument): FBXSceneData {
     const animations = extractAnimations(objectMap);
 
     // Extract cameras and lights from NodeAttribute objects
-    const cameras = extractCameras(objectMap);
-    const lights = extractLights(objectMap);
+    const cameras = extractCameras(objectMap, propertyTemplates);
+    const lights = extractLights(objectMap, propertyTemplates);
+    const diagnostics = extractSceneDiagnostics(objectMap);
 
     // Build model hierarchy
-    const rootModels = buildModelHierarchy(objectMap, geometries, materials);
+    const rootModels = buildModelHierarchy(objectMap, geometries, materials, propertyTemplates);
 
     return {
         rootModels,
@@ -168,6 +216,7 @@ export function interpretFBX(doc: FBXDocument): FBXSceneData {
         animations,
         cameras,
         lights,
+        diagnostics,
         ...globalSettings,
     };
 }
@@ -177,7 +226,8 @@ export function interpretFBX(doc: FBXDocument): FBXSceneData {
 function buildModelHierarchy(
     objectMap: FBXObjectMap,
     geometries: FBXGeometryData[],
-    materials: FBXMaterialData[]
+    materials: FBXMaterialData[],
+    propertyTemplates: FBXPropertyTemplateMap
 ): FBXModelData[] {
     const geometryMap = new Map<bigint, FBXGeometryData>();
     for (const g of geometries) {
@@ -196,7 +246,7 @@ function buildModelHierarchy(
     for (const { id } of rootChildren) {
         const node = objectMap.objects.get(id);
         if (node && node.name === "Model") {
-            rootModels.push(buildModel(id, node, objectMap, geometryMap, materialMap));
+            rootModels.push(buildModel(id, node, objectMap, geometryMap, materialMap, propertyTemplates));
         }
     }
 
@@ -208,7 +258,8 @@ function buildModel(
     modelNode: FBXNode,
     objectMap: FBXObjectMap,
     geometryMap: Map<bigint, FBXGeometryData>,
-    materialMap: Map<bigint, FBXMaterialData>
+    materialMap: Map<bigint, FBXMaterialData>,
+    propertyTemplates: FBXPropertyTemplateMap
 ): FBXModelData {
     const name = cleanFBXName(getPropertyValue<string>(modelNode, 1) ?? "Model");
     const subType = getPropertyValue<string>(modelNode, 2) ?? "Null";
@@ -226,13 +277,13 @@ function buildModel(
     }
 
     // Extract transform
-    const transform = extractTransform(modelNode);
+    const transform = extractTransform(modelNode, getPropertyTemplate(propertyTemplates, "Model", "FbxNode") ?? getPropertyTemplate(propertyTemplates, "Model"));
 
     // Recursively build child models
     const childModelNodes = getChildren(objectMap, modelId, "Model");
     const children: FBXModelData[] = [];
     for (const { id, node } of childModelNodes) {
-        children.push(buildModel(id, node, objectMap, geometryMap, materialMap));
+        children.push(buildModel(id, node, objectMap, geometryMap, materialMap, propertyTemplates));
     }
 
     // Extract culling
@@ -257,7 +308,7 @@ function buildModel(
     };
 }
 
-function extractTransform(modelNode: FBXNode): {
+function extractTransform(modelNode: FBXNode, template?: FBXPropertyTemplate): {
     translation: [number, number, number];
     rotation: [number, number, number];
     scale: [number, number, number];
@@ -272,105 +323,27 @@ function extractTransform(modelNode: FBXNode): {
     geometricScaling: [number, number, number];
     rotationOrder: number;
     inheritType: number;
+    diagnostics: string[];
 } {
-    const translation: [number, number, number] = [0, 0, 0];
-    const rotation: [number, number, number] = [0, 0, 0];
-    const scale: [number, number, number] = [1, 1, 1];
-    const preRotation: [number, number, number] = [0, 0, 0];
-    const postRotation: [number, number, number] = [0, 0, 0];
-    const rotationPivot: [number, number, number] = [0, 0, 0];
-    const scalingPivot: [number, number, number] = [0, 0, 0];
-    const rotationOffset: [number, number, number] = [0, 0, 0];
-    const scalingOffset: [number, number, number] = [0, 0, 0];
-    const geometricTranslation: [number, number, number] = [0, 0, 0];
-    const geometricRotation: [number, number, number] = [0, 0, 0];
-    const geometricScaling: [number, number, number] = [1, 1, 1];
-    let rotationOrder = 0;
-    let inheritType = 1;
+    const translation = resolveVector3Property(modelNode, template, "Lcl Translation", [0, 0, 0]);
+    const rotation = resolveVector3Property(modelNode, template, "Lcl Rotation", [0, 0, 0]);
+    const scale = resolveVector3Property(modelNode, template, "Lcl Scaling", [1, 1, 1]);
+    const preRotation = resolveVector3Property(modelNode, template, "PreRotation", [0, 0, 0]);
+    const postRotation = resolveVector3Property(modelNode, template, "PostRotation", [0, 0, 0]);
+    const rotationPivot = resolveVector3Property(modelNode, template, "RotationPivot", [0, 0, 0]);
+    const scalingPivot = resolveVector3Property(modelNode, template, "ScalingPivot", [0, 0, 0]);
+    const rotationOffset = resolveVector3Property(modelNode, template, "RotationOffset", [0, 0, 0]);
+    const scalingOffset = resolveVector3Property(modelNode, template, "ScalingOffset", [0, 0, 0]);
+    const geometricTranslation = resolveVector3Property(modelNode, template, "GeometricTranslation", [0, 0, 0]);
+    const geometricRotation = resolveVector3Property(modelNode, template, "GeometricRotation", [0, 0, 0]);
+    const geometricScaling = resolveVector3Property(modelNode, template, "GeometricScaling", [1, 1, 1]);
+    const rotationOrder = resolveNumberProperty(modelNode, template, "RotationOrder", 0);
+    const inheritType = resolveNumberProperty(modelNode, template, "InheritType", 1);
+    const diagnostics = inheritType !== 1
+        ? [`InheritType ${inheritType} is parsed and preserved; runtime parent-scale inheritance remains gated to avoid changing existing visual behavior without a fixture-specific baseline.`]
+        : [];
 
-    const transformDefaults = { translation, rotation, scale, preRotation, postRotation, rotationPivot, scalingPivot, rotationOffset, scalingOffset, geometricTranslation, geometricRotation, geometricScaling, rotationOrder, inheritType };
-    const propertyNodes = [
-        ...(modelNode.children.find((c) => c.name === "Properties70")?.children ?? []).filter((p) => p.name === "P"),
-        ...(modelNode.children.find((c) => c.name === "Properties60")?.children ?? []).filter((p) => p.name === "Property"),
-    ];
-    if (propertyNodes.length === 0) return transformDefaults;
-
-    for (const p of propertyNodes) {
-        const propName = getPropertyValue<string>(p, 0);
-        if (!propName) continue;
-        const valueOffset = p.name === "Property" ? 3 : 4;
-
-        switch (propName) {
-            case "Lcl Translation":
-                translation[0] = toNumber(p.properties[valueOffset]?.value) ?? 0;
-                translation[1] = toNumber(p.properties[valueOffset + 1]?.value) ?? 0;
-                translation[2] = toNumber(p.properties[valueOffset + 2]?.value) ?? 0;
-                break;
-            case "Lcl Rotation":
-                rotation[0] = toNumber(p.properties[valueOffset]?.value) ?? 0;
-                rotation[1] = toNumber(p.properties[valueOffset + 1]?.value) ?? 0;
-                rotation[2] = toNumber(p.properties[valueOffset + 2]?.value) ?? 0;
-                break;
-            case "Lcl Scaling":
-                scale[0] = toNumber(p.properties[valueOffset]?.value) ?? 1;
-                scale[1] = toNumber(p.properties[valueOffset + 1]?.value) ?? 1;
-                scale[2] = toNumber(p.properties[valueOffset + 2]?.value) ?? 1;
-                break;
-            case "PreRotation":
-                preRotation[0] = toNumber(p.properties[valueOffset]?.value) ?? 0;
-                preRotation[1] = toNumber(p.properties[valueOffset + 1]?.value) ?? 0;
-                preRotation[2] = toNumber(p.properties[valueOffset + 2]?.value) ?? 0;
-                break;
-            case "PostRotation":
-                postRotation[0] = toNumber(p.properties[valueOffset]?.value) ?? 0;
-                postRotation[1] = toNumber(p.properties[valueOffset + 1]?.value) ?? 0;
-                postRotation[2] = toNumber(p.properties[valueOffset + 2]?.value) ?? 0;
-                break;
-            case "RotationPivot":
-                rotationPivot[0] = toNumber(p.properties[valueOffset]?.value) ?? 0;
-                rotationPivot[1] = toNumber(p.properties[valueOffset + 1]?.value) ?? 0;
-                rotationPivot[2] = toNumber(p.properties[valueOffset + 2]?.value) ?? 0;
-                break;
-            case "ScalingPivot":
-                scalingPivot[0] = toNumber(p.properties[valueOffset]?.value) ?? 0;
-                scalingPivot[1] = toNumber(p.properties[valueOffset + 1]?.value) ?? 0;
-                scalingPivot[2] = toNumber(p.properties[valueOffset + 2]?.value) ?? 0;
-                break;
-            case "RotationOffset":
-                rotationOffset[0] = toNumber(p.properties[valueOffset]?.value) ?? 0;
-                rotationOffset[1] = toNumber(p.properties[valueOffset + 1]?.value) ?? 0;
-                rotationOffset[2] = toNumber(p.properties[valueOffset + 2]?.value) ?? 0;
-                break;
-            case "ScalingOffset":
-                scalingOffset[0] = toNumber(p.properties[valueOffset]?.value) ?? 0;
-                scalingOffset[1] = toNumber(p.properties[valueOffset + 1]?.value) ?? 0;
-                scalingOffset[2] = toNumber(p.properties[valueOffset + 2]?.value) ?? 0;
-                break;
-            case "GeometricTranslation":
-                geometricTranslation[0] = toNumber(p.properties[valueOffset]?.value) ?? 0;
-                geometricTranslation[1] = toNumber(p.properties[valueOffset + 1]?.value) ?? 0;
-                geometricTranslation[2] = toNumber(p.properties[valueOffset + 2]?.value) ?? 0;
-                break;
-            case "GeometricRotation":
-                geometricRotation[0] = toNumber(p.properties[valueOffset]?.value) ?? 0;
-                geometricRotation[1] = toNumber(p.properties[valueOffset + 1]?.value) ?? 0;
-                geometricRotation[2] = toNumber(p.properties[valueOffset + 2]?.value) ?? 0;
-                break;
-            case "GeometricScaling":
-                geometricScaling[0] = toNumber(p.properties[valueOffset]?.value) ?? 1;
-                geometricScaling[1] = toNumber(p.properties[valueOffset + 1]?.value) ?? 1;
-                geometricScaling[2] = toNumber(p.properties[valueOffset + 2]?.value) ?? 1;
-                break;
-            case "RotationOrder":
-                rotationOrder = toNumber(p.properties[valueOffset]?.value) ?? 0;
-                break;
-            case "InheritType":
-                inheritType = toNumber(p.properties[valueOffset]?.value) ?? 1;
-                break;
-        }
-    }
-
-    return { translation, rotation, scale, preRotation, postRotation, rotationPivot, scalingPivot, rotationOffset, scalingOffset, geometricTranslation, geometricRotation, geometricScaling, rotationOrder, inheritType };
+    return { translation, rotation, scale, preRotation, postRotation, rotationPivot, scalingPivot, rotationOffset, scalingOffset, geometricTranslation, geometricRotation, geometricScaling, rotationOrder, inheritType, diagnostics };
 }
 
 // ── Global Settings ────────────────────────────────────────────────────────────
@@ -486,8 +459,24 @@ function extractCustomProperties(modelNode: FBXNode): Record<string, string | nu
     return hasAny ? custom : undefined;
 }
 
-function extractCameras(objectMap: FBXObjectMap): FBXCameraData[] {
+const CAMERA_PROPERTIES = new Set([
+    "FieldOfView", "FieldOfViewX", "FieldOfViewY", "NearPlane", "FarPlane",
+    "AspectWidth", "AspectHeight", "FilmAspectRatio", "FocalLength",
+    "FilmWidth", "FilmHeight", "ApertureWidth", "ApertureHeight",
+    "CameraProjectionType", "ProjectionType", "OrthoZoom", "Roll",
+    "ApertureMode",
+]);
+
+const LIGHT_PROPERTIES = new Set([
+    "LightType", "Color", "Intensity", "InnerAngle", "OuterAngle", "ConeAngle",
+    "DecayType", "DecayStart", "EnableNearAttenuation", "EnableFarAttenuation",
+    "CastShadow", "Shadow",
+]);
+
+function extractCameras(objectMap: FBXObjectMap, templates: FBXPropertyTemplateMap): FBXCameraData[] {
     const cameras: FBXCameraData[] = [];
+    const cameraTemplate = getPropertyTemplate(templates, "NodeAttribute", "FbxCamera")
+        ?? getPropertyTemplate(templates, "NodeAttribute");
 
     for (const [id, node] of objectMap.objects) {
         if (node.name !== "NodeAttribute") continue;
@@ -502,43 +491,27 @@ function extractCameras(objectMap: FBXObjectMap): FBXCameraData[] {
 
         const name = cleanFBXName(getPropertyValue<string>(parentNode, 1) ?? "Camera");
 
-        let fieldOfView = 45;
-        let nearPlane = 0.1;
-        let farPlane = 10000;
-        let aspectRatio = 0;
-
-        const props70 = findChildByName(node, "Properties70");
-        if (props70) {
-            for (const p of props70.children) {
-                if (p.name !== "P") continue;
-                const pName = getPropertyValue<string>(p, 0);
-                const val = toNumber(p.properties[4]?.value);
-                if (val === undefined) continue;
-
-                switch (pName) {
-                    case "FieldOfView":
-                    case "FieldOfViewX":
-                    case "FieldOfViewY":
-                        fieldOfView = val;
-                        break;
-                    case "NearPlane":
-                        nearPlane = val;
-                        break;
-                    case "FarPlane":
-                        farPlane = val;
-                        break;
-                    case "AspectWidth":
-                        // Will compute aspect later if AspectHeight also present
-                        aspectRatio = val;
-                        break;
-                    case "AspectHeight":
-                        if (aspectRatio > 0) aspectRatio = aspectRatio / val;
-                        break;
-                    case "FilmAspectRatio":
-                        aspectRatio = val;
-                        break;
-                }
-            }
+        const nearPlane = resolveNumberProperty(node, cameraTemplate, "NearPlane", 0.1);
+        const farPlane = resolveNumberProperty(node, cameraTemplate, "FarPlane", 10000);
+        const aspectRatio = resolveCameraAspectRatio(node, cameraTemplate);
+        const projectionType = resolveNumberProperty(node, cameraTemplate, "CameraProjectionType", 0) === 1
+            || resolveNumberProperty(node, cameraTemplate, "ProjectionType", 0) === 1
+            ? "orthographic"
+            : "perspective";
+        const focalLength = toNumber(resolvePropertyValue(node, cameraTemplate, "FocalLength"));
+        const filmWidth = toNumber(resolvePropertyValue(node, cameraTemplate, "FilmWidth"))
+            ?? toNumber(resolvePropertyValue(node, cameraTemplate, "ApertureWidth"));
+        const filmHeight = toNumber(resolvePropertyValue(node, cameraTemplate, "FilmHeight"))
+            ?? toNumber(resolvePropertyValue(node, cameraTemplate, "ApertureHeight"));
+        const orthoZoom = toNumber(resolvePropertyValue(node, cameraTemplate, "OrthoZoom"));
+        const roll = toNumber(resolvePropertyValue(node, cameraTemplate, "Roll"));
+        const fieldOfView = resolveCameraFieldOfView(node, cameraTemplate, aspectRatio, focalLength, filmHeight);
+        const diagnostics: string[] = [];
+        if (projectionType === "orthographic" && orthoZoom === undefined) {
+            diagnostics.push("Orthographic camera has no OrthoZoom; runtime orthographic bounds use a fallback.");
+        }
+        if (focalLength !== undefined && filmHeight === undefined && resolvePropertyValue(node, cameraTemplate, "FieldOfView") === undefined) {
+            diagnostics.push("FocalLength is present without FilmHeight; default field of view fallback may be used.");
         }
 
         cameras.push({
@@ -548,14 +521,24 @@ function extractCameras(objectMap: FBXObjectMap): FBXCameraData[] {
             nearPlane,
             farPlane,
             aspectRatio,
+            projectionType,
+            focalLength,
+            filmWidth,
+            filmHeight,
+            orthoZoom,
+            roll,
+            unknownProperties: collectUnknownLocalProperties(node, CAMERA_PROPERTIES),
+            diagnostics,
         });
     }
 
     return cameras;
 }
 
-function extractLights(objectMap: FBXObjectMap): FBXLightData[] {
+function extractLights(objectMap: FBXObjectMap, templates: FBXPropertyTemplateMap): FBXLightData[] {
     const lights: FBXLightData[] = [];
+    const lightTemplate = getPropertyTemplate(templates, "NodeAttribute", "FbxLight")
+        ?? getPropertyTemplate(templates, "NodeAttribute");
 
     for (const [id, node] of objectMap.objects) {
         if (node.name !== "NodeAttribute") continue;
@@ -570,51 +553,26 @@ function extractLights(objectMap: FBXObjectMap): FBXLightData[] {
 
         const name = cleanFBXName(getPropertyValue<string>(parentNode, 1) ?? "Light");
 
-        let lightType = 0; // Point
-        let color: [number, number, number] = [1, 1, 1];
-        let intensity = 1;
-        let coneAngle = 45;
-        let decayType = 2; // Quadratic
-
-        const props70 = findChildByName(node, "Properties70");
-        if (props70) {
-            for (const p of props70.children) {
-                if (p.name !== "P") continue;
-                const pName = getPropertyValue<string>(p, 0);
-
-                switch (pName) {
-                    case "LightType": {
-                        const val = toNumber(p.properties[4]?.value);
-                        if (val !== undefined) lightType = val;
-                        break;
-                    }
-                    case "Color": {
-                        const r = toNumber(p.properties[4]?.value);
-                        const g = toNumber(p.properties[5]?.value);
-                        const b = toNumber(p.properties[6]?.value);
-                        if (r !== undefined && g !== undefined && b !== undefined) {
-                            color = [r, g, b];
-                        }
-                        break;
-                    }
-                    case "Intensity": {
-                        const val = toNumber(p.properties[4]?.value);
-                        if (val !== undefined) intensity = val / 100; // FBX uses 0-100
-                        break;
-                    }
-                    case "InnerAngle":
-                    case "ConeAngle": {
-                        const val = toNumber(p.properties[4]?.value);
-                        if (val !== undefined) coneAngle = val;
-                        break;
-                    }
-                    case "DecayType": {
-                        const val = toNumber(p.properties[4]?.value);
-                        if (val !== undefined) decayType = val;
-                        break;
-                    }
-                }
-            }
+        const lightType = resolveNumberProperty(node, lightTemplate, "LightType", 0);
+        const color = resolveVector3Property(node, lightTemplate, "Color", [1, 1, 1]);
+        const intensity = resolveNumberProperty(node, lightTemplate, "Intensity", 100) / 100;
+        const outerAngle = toNumber(resolvePropertyValue(node, lightTemplate, "OuterAngle"))
+            ?? toNumber(resolvePropertyValue(node, lightTemplate, "ConeAngle"));
+        const innerAngle = toNumber(resolvePropertyValue(node, lightTemplate, "InnerAngle"));
+        const coneAngle = outerAngle ?? 45;
+        const decayType = resolveNumberProperty(node, lightTemplate, "DecayType", 2);
+        const decayStart = toNumber(resolvePropertyValue(node, lightTemplate, "DecayStart"));
+        const enableNearAttenuation = toBoolean(resolvePropertyValue(node, lightTemplate, "EnableNearAttenuation"));
+        const enableFarAttenuation = toBoolean(resolvePropertyValue(node, lightTemplate, "EnableFarAttenuation"));
+        const castShadows = toBoolean(resolvePropertyValue(node, lightTemplate, "CastShadow"))
+            ?? toBoolean(resolvePropertyValue(parentNode, undefined, "CastShadow"))
+            ?? toBoolean(resolvePropertyValue(parentNode, undefined, "Shadow"));
+        const diagnostics: string[] = [];
+        if (decayType !== 2) {
+            diagnostics.push(`DecayType ${decayType} is preserved as metadata; Babylon falloff is not remapped in this pass.`);
+        }
+        if (decayStart !== undefined) {
+            diagnostics.push("DecayStart is preserved as metadata and is not mapped to Babylon light range.");
         }
 
         lights.push({
@@ -625,6 +583,14 @@ function extractLights(objectMap: FBXObjectMap): FBXLightData[] {
             intensity,
             coneAngle,
             decayType,
+            innerAngle,
+            outerAngle,
+            decayStart,
+            enableNearAttenuation,
+            enableFarAttenuation,
+            castShadows,
+            unknownProperties: collectUnknownLocalProperties(node, LIGHT_PROPERTIES),
+            diagnostics,
         });
     }
 
@@ -639,4 +605,70 @@ function toNumber(value: unknown): number | undefined {
     return undefined;
 }
 
+function toBoolean(value: unknown): boolean | undefined {
+    if (typeof value === "boolean") return value;
+    if (typeof value === "number") return value !== 0;
+    if (typeof value === "bigint") return value !== 0n;
+    return undefined;
+}
+
+function resolveCameraAspectRatio(node: FBXNode, template?: FBXPropertyTemplate): number {
+    const filmAspectRatio = toNumber(resolvePropertyValue(node, template, "FilmAspectRatio"));
+    if (filmAspectRatio !== undefined && filmAspectRatio > 0) return filmAspectRatio;
+
+    const aspectWidth = toNumber(resolvePropertyValue(node, template, "AspectWidth"));
+    const aspectHeight = toNumber(resolvePropertyValue(node, template, "AspectHeight"));
+    if (aspectWidth !== undefined && aspectHeight !== undefined && aspectWidth > 0 && aspectHeight > 0) {
+        return aspectWidth / aspectHeight;
+    }
+
+    return 0;
+}
+
+function resolveCameraFieldOfView(
+    node: FBXNode,
+    template: FBXPropertyTemplate | undefined,
+    aspectRatio: number,
+    focalLength: number | undefined,
+    filmHeight: number | undefined
+): number {
+    const verticalFov = toNumber(resolvePropertyValue(node, template, "FieldOfViewY"))
+        ?? toNumber(resolvePropertyValue(node, template, "FieldOfView"));
+    if (verticalFov !== undefined) return verticalFov;
+
+    const horizontalFov = toNumber(resolvePropertyValue(node, template, "FieldOfViewX"));
+    if (horizontalFov !== undefined) {
+        if (aspectRatio > 0) {
+            return radiansToDegrees(2 * Math.atan(Math.tan(degreesToRadians(horizontalFov) / 2) / aspectRatio));
+        }
+        return horizontalFov;
+    }
+
+    if (focalLength !== undefined && focalLength > 0 && filmHeight !== undefined && filmHeight > 0) {
+        return radiansToDegrees(2 * Math.atan((filmHeight * 25.4) / (2 * focalLength)));
+    }
+
+    return 45;
+}
+
+function collectUnknownLocalProperties(node: FBXNode, known: Set<string>): string[] {
+    const unknown = new Set<string>();
+    for (const containerName of ["Properties70", "Properties60"]) {
+        const container = findChildByName(node, containerName);
+        for (const propertyNode of container?.children ?? []) {
+            if (propertyNode.name !== "P" && propertyNode.name !== "Property") continue;
+            const propertyName = getPropertyValue<string>(propertyNode, 0);
+            if (propertyName && !known.has(propertyName)) unknown.add(propertyName);
+        }
+    }
+    return [...unknown].sort();
+}
+
+function degreesToRadians(degrees: number): number {
+    return degrees * Math.PI / 180;
+}
+
+function radiansToDegrees(radians: number): number {
+    return radians * 180 / Math.PI;
+}
 

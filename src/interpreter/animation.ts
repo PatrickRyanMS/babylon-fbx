@@ -43,16 +43,53 @@ export interface FBXCurveNodeData {
     curves: FBXCurveData[];
 }
 
+export interface FBXUnsupportedCurveNodeData {
+    /** Raw AnimationCurveNode property type/name */
+    type: string;
+    /** CurveNode object ID */
+    id: bigint;
+    /** Target object ID if the curve node is connected to an object/property */
+    targetId: bigint | null;
+    /** OP connection property name on the target, e.g. Visibility */
+    propertyName?: string;
+    /** Number of connected animation curves that were ignored */
+    curveCount: number;
+    /** Connected curves preserved for diagnostics and future runtime support */
+    curves: FBXCurveData[];
+    /** Local default values stored on the unsupported curve node */
+    defaultValues: Record<string, number>;
+}
+
+export interface FBXAnimationDiagnostic {
+    type:
+        | "multiple-animation-layers"
+        | "unsupported-layer-blend-mode"
+        | "partial-layer-weight"
+        | "unsupported-curve-node";
+    message: string;
+    layerName?: string;
+    curveNodeId?: bigint;
+    curveNodeType?: string;
+    targetId?: bigint | null;
+    propertyName?: string;
+}
+
 /** Animation layer with blend mode info */
 export interface FBXAnimationLayerData {
     /** Layer name */
     name: string;
     /** Layer weight (0-100, default 100) */
     weight: number;
+    /** Layer weight normalized to 0-1 */
+    normalizedWeight: number;
     /** Blend mode: 0=Additive, 1=Override, 2=OverridePassthrough */
     blendMode: number;
     /** Curve nodes in this layer */
     curveNodes: FBXCurveNodeData[];
+    /** Unsupported/non-TRS curve nodes preserved for diagnostics */
+    unsupportedCurveNodes: FBXUnsupportedCurveNodeData[];
+    /** Recoverable layer diagnostics */
+    diagnostics: FBXAnimationDiagnostic[];
 }
 
 /** One animation clip (AnimationStack) */
@@ -69,6 +106,10 @@ export interface FBXAnimationStackData {
     curveNodes: FBXCurveNodeData[];
     /** Animation layers (preserves blend mode info) */
     layers: FBXAnimationLayerData[];
+    /** Unsupported/non-TRS curve nodes preserved for diagnostics */
+    unsupportedCurveNodes: FBXUnsupportedCurveNodeData[];
+    /** Recoverable animation diagnostics */
+    diagnostics: FBXAnimationDiagnostic[];
 }
 
 /**
@@ -101,7 +142,9 @@ function extractAnimStack(
 
     // Collect all CurveNodes from all layers
     const allCurveNodes: FBXCurveNodeData[] = [];
+    const allUnsupportedCurveNodes: FBXUnsupportedCurveNodeData[] = [];
     const layers: FBXAnimationLayerData[] = [];
+    const diagnostics: FBXAnimationDiagnostic[] = [];
     let minTime = Infinity;
     let maxTime = 0;
 
@@ -130,10 +173,34 @@ function extractAnimStack(
         // AnimationCurveNodes are children of the layer
         const curveNodeEntries = getChildren(objectMap, layerId, "AnimationCurveNode");
         const layerCurveNodes: FBXCurveNodeData[] = [];
+        const layerUnsupportedCurveNodes: FBXUnsupportedCurveNodeData[] = [];
+        const layerDiagnostics: FBXAnimationDiagnostic[] = [];
 
         for (const { id: curveNodeId, node: curveNodeNode } of curveNodeEntries) {
             const curveNodeData = extractCurveNode(curveNodeId, curveNodeNode, objectMap);
-            if (!curveNodeData) continue;
+            if (!curveNodeData) {
+                const unsupported = extractUnsupportedCurveNode(curveNodeId, curveNodeNode, objectMap);
+                if (unsupported) {
+                    scanCurveTimes(unsupported.curves, (time) => {
+                        if (time < minTime) minTime = time;
+                        if (time > maxTime) maxTime = time;
+                    });
+                    layerUnsupportedCurveNodes.push(unsupported);
+                    allUnsupportedCurveNodes.push(unsupported);
+                    const diagnostic: FBXAnimationDiagnostic = {
+                        type: "unsupported-curve-node",
+                        message: `AnimationCurveNode '${unsupported.type}' is preserved as diagnostic data but not evaluated at runtime.`,
+                        layerName,
+                        curveNodeId,
+                        curveNodeType: unsupported.type,
+                        targetId: unsupported.targetId,
+                        propertyName: unsupported.propertyName,
+                    };
+                    layerDiagnostics.push(diagnostic);
+                    diagnostics.push(diagnostic);
+                }
+                continue;
+            }
 
             for (const curve of curveNodeData.curves) {
                 for (const key of curve.keys) {
@@ -149,18 +216,55 @@ function extractAnimStack(
         layers.push({
             name: layerName,
             weight,
+            normalizedWeight: weight / 100,
             blendMode,
             curveNodes: layerCurveNodes,
+            unsupportedCurveNodes: layerUnsupportedCurveNodes,
+            diagnostics: layerDiagnostics,
         });
     }
 
-    if (allCurveNodes.length === 0) return null;
+    if (allCurveNodes.length === 0 && allUnsupportedCurveNodes.length === 0) return null;
+
+    if (layers.length > 1) {
+        diagnostics.push({
+            type: "multiple-animation-layers",
+            message: "Multiple animation layers are preserved, but runtime blending is not yet evaluated.",
+        });
+    }
+    for (const layer of layers) {
+        if (layer.blendMode !== 0) {
+            const diagnostic: FBXAnimationDiagnostic = {
+                type: "unsupported-layer-blend-mode",
+                message: `Animation layer blend mode ${layer.blendMode} is preserved but not yet blended at runtime.`,
+                layerName: layer.name,
+            };
+            layer.diagnostics.push(diagnostic);
+            diagnostics.push(diagnostic);
+        }
+        if (layer.weight !== 100) {
+            const diagnostic: FBXAnimationDiagnostic = {
+                type: "partial-layer-weight",
+                message: `Animation layer weight ${layer.weight} is preserved but not yet applied at runtime.`,
+                layerName: layer.name,
+            };
+            layer.diagnostics.push(diagnostic);
+            diagnostics.push(diagnostic);
+        }
+    }
 
     const timeOffset = minTime > 0 && isFinite(minTime) ? minTime : 0;
 
     // Rebase all keyframe times so the animation starts at 0
     if (timeOffset > 0) {
         for (const cn of allCurveNodes) {
+            for (const curve of cn.curves) {
+                for (const key of curve.keys) {
+                    key.time -= timeOffset;
+                }
+            }
+        }
+        for (const cn of allUnsupportedCurveNodes) {
             for (const curve of cn.curves) {
                 for (const key of curve.keys) {
                     key.time -= timeOffset;
@@ -187,6 +291,8 @@ function extractAnimStack(
         duration: Math.max(stopTime - startTime, 0),
         curveNodes: allCurveNodes,
         layers,
+        unsupportedCurveNodes: allUnsupportedCurveNodes,
+        diagnostics,
     };
 }
 
@@ -248,6 +354,45 @@ function extractCurveNode(
     }
 
     return null;
+}
+
+function extractUnsupportedCurveNode(
+    curveNodeId: bigint,
+    curveNodeNode: FBXNode,
+    objectMap: FBXObjectMap
+): FBXUnsupportedCurveNodeData | null {
+    const typeName = cleanFBXName(getPropertyValue<string>(curveNodeNode, 1) ?? "");
+    const curves = extractCurves(curveNodeId, objectMap);
+    const defaultValues = extractCurveNodeDefaultValues(curveNodeNode);
+    if (curves.length === 0 && Object.keys(defaultValues).length === 0) return null;
+
+    let targetId: bigint | null = null;
+    let propertyName: string | undefined;
+    for (const conn of objectMap.connections) {
+        if (conn.childId === curveNodeId && conn.type === "OP") {
+            targetId = conn.parentId;
+            propertyName = conn.propertyName;
+            break;
+        }
+    }
+
+    return {
+        type: typeName,
+        id: curveNodeId,
+        targetId,
+        propertyName,
+        curveCount: curves.length,
+        curves,
+        defaultValues,
+    };
+}
+
+function scanCurveTimes(curves: FBXCurveData[], visit: (time: number) => void): void {
+    for (const curve of curves) {
+        for (const key of curve.keys) {
+            visit(key.time);
+        }
+    }
 }
 
 /**
@@ -333,6 +478,19 @@ function extractCurves(curveNodeId: bigint, objectMap: FBXObjectMap): FBXCurveDa
     }
 
     return curves;
+}
+
+function extractCurveNodeDefaultValues(curveNodeNode: FBXNode): Record<string, number> {
+    const defaults: Record<string, number> = {};
+    const props70 = findChildByName(curveNodeNode, "Properties70");
+    for (const p of props70?.children ?? []) {
+        if (p.name !== "P") continue;
+        const propName = getPropertyValue<string>(p, 0);
+        if (!propName?.startsWith("d|")) continue;
+        const value = toNumber(p.properties[4]?.value);
+        if (value !== null) defaults[propName] = value;
+    }
+    return defaults;
 }
 
 /**
@@ -441,6 +599,12 @@ function fbxTimeToSeconds(value: unknown): number | null {
     if (typeof value === "number") {
         return value / FBX_TIME_UNIT;
     }
+    return null;
+}
+
+function toNumber(value: unknown): number | null {
+    if (typeof value === "number") return value;
+    if (typeof value === "bigint") return Number(value);
     return null;
 }
 

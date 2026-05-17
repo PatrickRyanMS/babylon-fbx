@@ -5,11 +5,12 @@ import type {
     ISceneLoaderProgressEvent,
 } from "@babylonjs/core/Loading/sceneLoader.js";
 import type { Scene } from "@babylonjs/core/scene.js";
-import type { Nullable } from "@babylonjs/core/types.js";
+import type { FloatArray, Nullable } from "@babylonjs/core/types.js";
 import { Mesh } from "@babylonjs/core/Meshes/mesh.js";
 import { SubMesh } from "@babylonjs/core/Meshes/subMesh.js";
 import { VertexData } from "@babylonjs/core/Meshes/mesh.vertexData.js";
 import { StandardMaterial } from "@babylonjs/core/Materials/standardMaterial.js";
+import { Material } from "@babylonjs/core/Materials/material.js";
 import { MultiMaterial } from "@babylonjs/core/Materials/multiMaterial.js";
 import { Texture } from "@babylonjs/core/Materials/Textures/texture.js";
 import { Color3 } from "@babylonjs/core/Maths/math.color.js";
@@ -22,6 +23,7 @@ import { AnimationGroup } from "@babylonjs/core/Animations/animationGroup.js";
 import { AnimationKeyInterpolation, type IAnimationKey } from "@babylonjs/core/Animations/animationKey.js";
 import { MorphTarget } from "@babylonjs/core/Morph/morphTarget.js";
 import { MorphTargetManager } from "@babylonjs/core/Morph/morphTargetManager.js";
+import { Camera } from "@babylonjs/core/Cameras/camera.js";
 import { FreeCamera } from "@babylonjs/core/Cameras/freeCamera.js";
 import { PointLight } from "@babylonjs/core/Lights/pointLight.js";
 import { DirectionalLight } from "@babylonjs/core/Lights/directionalLight.js";
@@ -36,8 +38,16 @@ import type { FBXGeometryData } from "./interpreter/geometry.js";
 import type { FBXMaterialData } from "./interpreter/materials.js";
 import type { FBXSkinData, FBXBoneData } from "./interpreter/skeleton.js";
 import type { FBXRigData, FBXSkinBindingData } from "./interpreter/rig.js";
-import type { FBXBlendShapeData } from "./interpreter/blendShapes.js";
+import type { FBXBlendShapeData, FBXShapeData } from "./interpreter/blendShapes.js";
 import { sampleFBXCurveAtTime, type FBXAnimationStackData, type FBXCurveData, type FBXCurveNodeData } from "./interpreter/animation.js";
+import {
+    computeFBXGeometricDeltaMatrix,
+    computeFBXGeometricMatrix,
+    computeFBXGeometricNormalMatrix,
+    computeFBXLocalMatrix,
+    eulerToMatrix,
+    eulerToMatrixXYZ,
+} from "./interpreter/transform.js";
 
 const FBX_ASCII_MAGIC = "; FBX";
 const FBX_BINARY_MAGIC = "Kaydara FBX Binary";
@@ -210,7 +220,8 @@ export class FBXFileLoader implements ISceneLoaderPluginAsync {
 
         // Build the FBX hierarchy under the same handedness conversion root that
         // Babylon's glTF loader uses when loading right-handed assets into a
-        // left-handed scene.
+        // left-handed scene. If the FBX file declares a non-Y-up scene basis,
+        // add a child axis-conversion root so model/bind math stays in FBX space.
         const rootNode = new TransformNode("__fbx_root__", scene);
         if (!scene.useRightHandedSystem) {
             rootNode.rotation.y = Math.PI;
@@ -219,6 +230,14 @@ export class FBXFileLoader implements ISceneLoaderPluginAsync {
 
         const meshes: Mesh[] = [];
         const transformNodes: TransformNode[] = [rootNode];
+        let assetRoot = rootNode;
+        const axisConversion = FBXFileLoader._computeFBXAxisConversionMatrix(fbxScene);
+        if (!axisConversion.equals(Matrix.Identity())) {
+            assetRoot = new TransformNode("__fbx_axis_conversion__", scene);
+            assetRoot.parent = rootNode;
+            FBXFileLoader._applyMatrixToTransform(assetRoot, axisConversion);
+            transformNodes.push(assetRoot);
+        }
         const modelIdToNode = new Map<bigint, TransformNode>();
         const fbxWorldIdentity = Matrix.Identity();
 
@@ -226,8 +245,8 @@ export class FBXFileLoader implements ISceneLoaderPluginAsync {
             this._buildModel(
                 model,
                 scene,
-                rootNode,
-                rootNode,
+                assetRoot,
+                assetRoot,
                 fbxWorldIdentity,
                 materialCache,
                 nameFilter,
@@ -327,6 +346,40 @@ export class FBXFileLoader implements ISceneLoaderPluginAsync {
         };
     }
 
+    private static _computeFBXAxisConversionMatrix(fbxScene: FBXSceneData): Matrix {
+        const basisRows: [number, number, number][] = [
+            [0, 0, 0],
+            [0, 0, 0],
+            [0, 0, 0],
+        ];
+
+        const assignAxis = (
+            sourceAxis: number,
+            sourceSign: number,
+            targetAxis: number
+        ): void => {
+            if (sourceAxis < 0 || sourceAxis > 2) return;
+            const row: [number, number, number] = [0, 0, 0];
+            row[targetAxis] = sourceSign >= 0 ? 1 : -1;
+            basisRows[sourceAxis] = row;
+        };
+
+        assignAxis(fbxScene.coordAxis, fbxScene.coordAxisSign, 0);
+        assignAxis(fbxScene.upAxis, fbxScene.upAxisSign, 1);
+        assignAxis(fbxScene.frontAxis, fbxScene.frontAxisSign, 2);
+
+        if (basisRows.some((row) => row.every((value) => value === 0))) {
+            return Matrix.Identity();
+        }
+
+        return Matrix.FromValues(
+            basisRows[0][0], basisRows[0][1], basisRows[0][2], 0,
+            basisRows[1][0], basisRows[1][1], basisRows[1][2], 0,
+            basisRows[2][0], basisRows[2][1], basisRows[2][2], 0,
+            0, 0, 0, 1
+        );
+    }
+
     private _buildModel(
         model: FBXModelData,
         scene: Scene,
@@ -366,10 +419,13 @@ export class FBXFileLoader implements ISceneLoaderPluginAsync {
             // meshes. The pose matrix cancels the real FBX mesh transform only;
             // the root handedness conversion remains applied once at render time.
             if (skeleton && skin) {
+                const meshBindMatrix = skin.meshBindPoseMatrix
+                    ? Matrix.FromArray(skin.meshBindPoseMatrix)
+                    : fbxWorldMatrix;
                 mesh.parent = assetRoot;
-                FBXFileLoader._applyMatrixToTransform(mesh, fbxWorldMatrix);
+                FBXFileLoader._applyMatrixToTransform(mesh, meshBindMatrix);
                 mesh.computeWorldMatrix(true);
-                mesh.updatePoseMatrix(Matrix.Invert(fbxWorldMatrix));
+                mesh.updatePoseMatrix(Matrix.Invert(meshBindMatrix));
                 mesh.alwaysSelectAsActiveMesh = true;
             } else {
                 if (parent) {
@@ -400,10 +456,7 @@ export class FBXFileLoader implements ISceneLoaderPluginAsync {
             meshes.push(mesh);
             modelIdToNode.set(model.id, mesh);
 
-            // Apply custom properties as metadata
-            if (model.customProperties) {
-                mesh.metadata = { ...(mesh.metadata as object ?? {}), fbxCustomProperties: model.customProperties };
-            }
+            FBXFileLoader._applyModelMetadata(mesh, model);
 
             // Recurse children
             for (const child of model.children) {
@@ -422,16 +475,23 @@ export class FBXFileLoader implements ISceneLoaderPluginAsync {
             transformNodes.push(transformNode);
             modelIdToNode.set(model.id, transformNode);
 
-            // Apply custom properties as metadata
-            if (model.customProperties) {
-                transformNode.metadata = { fbxCustomProperties: model.customProperties };
-            }
+            FBXFileLoader._applyModelMetadata(transformNode, model);
 
             // Recurse children
             for (const child of model.children) {
                 this._buildModel(child, scene, transformNode, assetRoot, fbxWorldMatrix, materialCache, nameFilter, meshes, transformNodes, skeletonByGeometryId, skinByGeometryId, skinBindingByGeometryId, modelIdToNode);
             }
         }
+    }
+
+    private static _applyModelMetadata(node: TransformNode | Mesh, model: FBXModelData): void {
+        if (!model.customProperties && model.diagnostics.length === 0) return;
+
+        node.metadata = {
+            ...(node.metadata as object ?? {}),
+            ...(model.customProperties ? { fbxCustomProperties: model.customProperties } : {}),
+            ...(model.diagnostics.length > 0 ? { fbxDiagnostics: model.diagnostics } : {}),
+        };
     }
 
     private _createMesh(
@@ -517,6 +577,10 @@ export class FBXFileLoader implements ISceneLoaderPluginAsync {
         }
         if (geomData.uvSets.length > 5) {
             vertexData.uvs6 = float64To32(geomData.uvSets[5].data);
+        }
+
+        if (geomData.tangents) {
+            vertexData.tangents = float64To32(geomData.tangents);
         }
 
         if (geomData.colors) {
@@ -823,41 +887,61 @@ export class FBXFileLoader implements ISceneLoaderPluginAsync {
         const material = new StandardMaterial(matData.name, scene);
 
         const props = matData.properties;
+        const hasTexture = (...slots: string[]): boolean =>
+            matData.textures.some((texture) => slots.includes(texture.propertyName));
 
         if (props.diffuseColor) {
+            const diffuseFactor = hasTexture("DiffuseColor", "Diffuse")
+                ? 1
+                : props.diffuseFactor ?? 1;
             material.diffuseColor = new Color3(
-                props.diffuseColor[0],
-                props.diffuseColor[1],
-                props.diffuseColor[2]
+                props.diffuseColor[0] * diffuseFactor,
+                props.diffuseColor[1] * diffuseFactor,
+                props.diffuseColor[2] * diffuseFactor
             );
         }
 
         if (props.ambientColor) {
+            const ambientFactor = hasTexture("AmbientColor", "Ambient")
+                ? 1
+                : props.ambientFactor ?? 1;
             material.ambientColor = new Color3(
-                props.ambientColor[0],
-                props.ambientColor[1],
-                props.ambientColor[2]
+                props.ambientColor[0] * ambientFactor,
+                props.ambientColor[1] * ambientFactor,
+                props.ambientColor[2] * ambientFactor
             );
         }
 
         if (props.specularColor) {
+            const specularFactor = hasTexture("SpecularColor", "Specular", "Shininess", "ShininessExponent")
+                ? 1
+                : props.specularFactor ?? 1;
             material.specularColor = new Color3(
-                props.specularColor[0],
-                props.specularColor[1],
-                props.specularColor[2]
+                props.specularColor[0] * specularFactor,
+                props.specularColor[1] * specularFactor,
+                props.specularColor[2] * specularFactor
             );
         }
 
         if (props.emissiveColor) {
+            const emissiveFactor = hasTexture("EmissiveColor", "Emissive")
+                ? 1
+                : props.emissiveFactor ?? 1;
             material.emissiveColor = new Color3(
-                props.emissiveColor[0],
-                props.emissiveColor[1],
-                props.emissiveColor[2]
+                props.emissiveColor[0] * emissiveFactor,
+                props.emissiveColor[1] * emissiveFactor,
+                props.emissiveColor[2] * emissiveFactor
             );
         }
 
         if (props.opacity !== undefined) {
             material.alpha = props.opacity;
+        } else if (props.transparencyFactor !== undefined) {
+            material.alpha = 1 - props.transparencyFactor;
+        }
+
+        if (material.alpha < 1) {
+            material.transparencyMode = Material.MATERIAL_ALPHABLEND;
         }
 
         if (props.shininess !== undefined) {
@@ -900,7 +984,10 @@ export class FBXFileLoader implements ISceneLoaderPluginAsync {
                     material.diffuseColor = new Color3(1, 1, 1);
                     break;
                 case "NormalMap":
+                case "NormalMapTexture":
+                case "normalCamera":
                 case "Bump":
+                case "BumpFactor":
                     material.bumpTexture = texture;
                     break;
                 case "EmissiveColor":
@@ -915,6 +1002,7 @@ export class FBXFileLoader implements ISceneLoaderPluginAsync {
                 case "TransparencyFactor":
                 case "TransparentColor":
                     material.opacityTexture = texture;
+                    material.transparencyMode = Material.MATERIAL_ALPHATESTANDBLEND;
                     break;
                 case "ReflectionColor":
                 case "ReflectionFactor":
@@ -922,10 +1010,12 @@ export class FBXFileLoader implements ISceneLoaderPluginAsync {
                     break;
                 case "DisplacementColor":
                 case "Displacement":
+                case "DisplacementFactor":
                     // StandardMaterial doesn't have a displacement slot natively;
                     // store for potential PBR conversion use
                     break;
                 case "ShininessExponent":
+                case "Shininess":
                     // Shininess map — no direct StandardMaterial slot
                     break;
             }
@@ -1038,10 +1128,6 @@ export class FBXFileLoader implements ISceneLoaderPluginAsync {
                 ?? deltaMatrix;
 
             for (const channel of bs.channels) {
-                // Use the first shape (in-between shapes not yet supported)
-                const shape = channel.shapes[0];
-                if (!shape) continue;
-
                 // Get the control point indices for this mesh (stored as metadata)
                 const cpIndices = (mesh.metadata as { fbxControlPointIndices?: Uint32Array } | undefined)?.fbxControlPointIndices;
                 if (!cpIndices) continue;
@@ -1050,87 +1136,52 @@ export class FBXFileLoader implements ISceneLoaderPluginAsync {
                 const baseNormals = mesh.getVerticesData("normal");
                 if (!basePositions) continue;
 
-                const vertexCount = basePositions.length / 3;
+                const initialInfluences = calculateBlendShapeInfluences(channel.deformPercent, channel.fullWeights, channel.shapes.length);
+                const targetIndices: number[] = [];
+                for (let shapeIndex = 0; shapeIndex < channel.shapes.length; shapeIndex++) {
+                    const shape = channel.shapes[shapeIndex];
+                    if (!shape) continue;
+                    const targetData = buildMorphTargetData(
+                        shape,
+                        cpIndices,
+                        basePositions,
+                        baseNormals,
+                        deltaMatrix,
+                        normalMatrix,
+                        unitScaleFactor
+                    );
+                    if (!targetData) continue;
 
-                // Babylon MorphTarget.setPositions expects ABSOLUTE target positions.
-                // FBX shape vertices are deltas, so we add them to the base.
-                const targetPositions = new Float32Array(vertexCount * 3);
-                const hasNormals = shape.normals !== null && baseNormals !== null;
-                const targetNormals = hasNormals ? new Float32Array(vertexCount * 3) : null;
-
-                // Copy base positions (unaffected vertices stay at base)
-                for (let i = 0; i < targetPositions.length; i++) {
-                    targetPositions[i] = basePositions[i];
-                }
-                if (targetNormals && baseNormals) {
-                    for (let i = 0; i < targetNormals.length; i++) {
-                        targetNormals[i] = baseNormals[i];
-                    }
-                }
-
-                // Build a lookup from control point index to shape data index
-                const cpToShapeIdx = new Map<number, number>();
-                for (let i = 0; i < shape.indices.length; i++) {
-                    cpToShapeIdx.set(shape.indices[i], i);
-                }
-
-                for (let vi = 0; vi < vertexCount; vi++) {
-                    const cpIdx = cpIndices[vi];
-                    const shapeIdx = cpToShapeIdx.get(cpIdx);
-                    if (shapeIdx === undefined) continue;
-
-                    // Get the raw FBX delta
-                    let dx = shape.vertices[shapeIdx * 3];
-                    let dy = shape.vertices[shapeIdx * 3 + 1];
-                    let dz = shape.vertices[shapeIdx * 3 + 2];
-
-                    if (deltaMatrix) {
-                        const rv = Vector3.TransformNormal(new Vector3(dx, dy, dz), deltaMatrix);
-                        dx = rv.x; dy = rv.y; dz = rv.z;
+                    const targetName = channel.fullWeights && channel.shapes.length > 1
+                        ? `${channel.name}_${channel.fullWeights[shapeIndex]}`
+                        : channel.name;
+                    const morphTarget = new MorphTarget(targetName, initialInfluences[shapeIndex] ?? 0, scene);
+                    morphTarget.setPositions(targetData.positions);
+                    if (targetData.normals) {
+                        morphTarget.setNormals(targetData.normals);
                     }
 
-                    // Scale delta by UnitScaleFactor — base mesh positions are in scaled space
-                    // but shape deltas are stored in the original unscaled space
-                    if (unitScaleFactor !== 1) {
-                        dx *= unitScaleFactor;
-                        dy *= unitScaleFactor;
-                        dz *= unitScaleFactor;
-                    }
-
-                    targetPositions[vi * 3] += dx;
-                    targetPositions[vi * 3 + 1] += dy;
-                    targetPositions[vi * 3 + 2] += dz;
-
-                    if (targetNormals && shape.normals) {
-                        let nx = shape.normals[shapeIdx * 3];
-                        let ny = shape.normals[shapeIdx * 3 + 1];
-                        let nz = shape.normals[shapeIdx * 3 + 2];
-                        if (normalMatrix) {
-                            const rn = Vector3.TransformNormal(new Vector3(nx, ny, nz), normalMatrix);
-                            if (rn.lengthSquared() > 0) {
-                                rn.normalize();
-                            }
-                            nx = rn.x; ny = rn.y; nz = rn.z;
-                        }
-                        targetNormals[vi * 3] += nx;
-                        targetNormals[vi * 3 + 1] += ny;
-                        targetNormals[vi * 3 + 2] += nz;
-                    }
+                    targetIndices.push(morphTargetManager.numTargets);
+                    morphTargetManager.addTarget(morphTarget);
                 }
 
-                const morphTarget = new MorphTarget(channel.name, channel.deformPercent / 100, scene);
-                morphTarget.setPositions(targetPositions);
-                if (targetNormals) {
-                    morphTarget.setNormals(targetNormals);
-                }
-                // Store channel ID mapping on the mesh for animation targeting
+                if (targetIndices.length === 0) continue;
+
+                // Store channel ID mapping on the mesh for animation targeting.
+                // Keep the legacy single-target map for existing consumers and add
+                // richer in-between metadata for FullWeights-aware animation baking.
                 if (!mesh.metadata) mesh.metadata = {};
                 if (!(mesh.metadata as Record<string, unknown>).fbxBlendShapeChannelIds) {
                     (mesh.metadata as Record<string, unknown>).fbxBlendShapeChannelIds = new Map<bigint, number>();
                 }
-                ((mesh.metadata as Record<string, unknown>).fbxBlendShapeChannelIds as Map<bigint, number>).set(channel.id, morphTargetManager.numTargets);
-
-                morphTargetManager.addTarget(morphTarget);
+                ((mesh.metadata as Record<string, unknown>).fbxBlendShapeChannelIds as Map<bigint, number>).set(channel.id, targetIndices[0]);
+                if (!(mesh.metadata as Record<string, unknown>).fbxBlendShapeChannelTargets) {
+                    (mesh.metadata as Record<string, unknown>).fbxBlendShapeChannelTargets = new Map<bigint, { targetIndices: number[]; fullWeights: number[] | null }>();
+                }
+                ((mesh.metadata as Record<string, unknown>).fbxBlendShapeChannelTargets as Map<bigint, { targetIndices: number[]; fullWeights: number[] | null }>).set(channel.id, {
+                    targetIndices,
+                    fullWeights: channel.fullWeights,
+                });
             }
 
             if (morphTargetManager.numTargets > 0) {
@@ -1152,6 +1203,30 @@ export class FBXFileLoader implements ISceneLoaderPluginAsync {
         camera.fov = camData.fieldOfView * (Math.PI / 180);
         camera.minZ = camData.nearPlane;
         camera.maxZ = camData.farPlane;
+        camera.metadata = {
+            ...(camera.metadata as object ?? {}),
+            fbxCamera: {
+                projectionType: camData.projectionType,
+                focalLength: camData.focalLength,
+                filmWidth: camData.filmWidth,
+                filmHeight: camData.filmHeight,
+                orthoZoom: camData.orthoZoom,
+                roll: camData.roll,
+                aspectRatio: camData.aspectRatio,
+                unknownProperties: camData.unknownProperties,
+                diagnostics: camData.diagnostics,
+            },
+        };
+
+        if (camData.projectionType === "orthographic") {
+            const orthoHeight = camData.orthoZoom && camData.orthoZoom > 0 ? camData.orthoZoom : 1;
+            const aspect = camData.aspectRatio > 0 ? camData.aspectRatio : 1;
+            camera.mode = Camera.ORTHOGRAPHIC_CAMERA;
+            camera.orthoTop = orthoHeight / 2;
+            camera.orthoBottom = -orthoHeight / 2;
+            camera.orthoRight = (orthoHeight * aspect) / 2;
+            camera.orthoLeft = -(orthoHeight * aspect) / 2;
+        }
 
         if (parentNode) {
             camera.parent = parentNode;
@@ -1190,6 +1265,22 @@ export class FBXFileLoader implements ISceneLoaderPluginAsync {
                 light.intensity = lightData.intensity;
                 break;
         }
+
+        light.metadata = {
+            ...(light.metadata as object ?? {}),
+            fbxLight: {
+                lightType: lightData.lightType,
+                decayType: lightData.decayType,
+                decayStart: lightData.decayStart,
+                innerAngle: lightData.innerAngle,
+                outerAngle: lightData.outerAngle,
+                enableNearAttenuation: lightData.enableNearAttenuation,
+                enableFarAttenuation: lightData.enableFarAttenuation,
+                castShadows: lightData.castShadows,
+                unknownProperties: lightData.unknownProperties,
+                diagnostics: lightData.diagnostics,
+            },
+        };
 
         if (parentNode) {
             light.parent = parentNode;
@@ -1276,10 +1367,7 @@ export class FBXFileLoader implements ISceneLoaderPluginAsync {
      * In row-vector convention: v' = v * Rx * Ry * Rz
      */
     private static _eulerToMatrixXYZ(rx: number, ry: number, rz: number): Matrix {
-        const mx = Matrix.RotationX(rx);
-        const my = Matrix.RotationY(ry);
-        const mz = Matrix.RotationZ(rz);
-        return mx.multiply(my).multiply(mz);
+        return eulerToMatrixXYZ(rx, ry, rz);
     }
 
     /**
@@ -1288,18 +1376,7 @@ export class FBXFileLoader implements ISceneLoaderPluginAsync {
      * In row-vector convention: v' = v * R1 * R2 * R3
      */
     private static _eulerToMatrix(rx: number, ry: number, rz: number, order: number): Matrix {
-        const mx = Matrix.RotationX(rx);
-        const my = Matrix.RotationY(ry);
-        const mz = Matrix.RotationZ(rz);
-        switch (order) {
-            case 0: return mx.multiply(my).multiply(mz); // XYZ
-            case 1: return mx.multiply(mz).multiply(my); // XZY
-            case 2: return my.multiply(mz).multiply(mx); // YZX
-            case 3: return my.multiply(mx).multiply(mz); // YXZ
-            case 4: return mz.multiply(mx).multiply(my); // ZXY
-            case 5: return mz.multiply(my).multiply(mx); // ZYX
-            default: return mx.multiply(my).multiply(mz); // fallback to XYZ
-        }
+        return eulerToMatrix(rx, ry, rz, order);
     }
 
     private static _computeFBXGeometricMatrix(
@@ -1307,32 +1384,21 @@ export class FBXFileLoader implements ISceneLoaderPluginAsync {
         rotation: [number, number, number],
         scale: [number, number, number]
     ): Matrix {
-        const translationM = Matrix.Translation(translation[0], translation[1], translation[2]);
-        return FBXFileLoader._computeFBXGeometricDeltaMatrix(rotation, scale).multiply(translationM);
+        return computeFBXGeometricMatrix(translation, rotation, scale);
     }
 
     private static _computeFBXGeometricDeltaMatrix(
         rotation: [number, number, number],
         scale: [number, number, number]
     ): Matrix {
-        const d2r = Math.PI / 180;
-        const scaleM = Matrix.Scaling(scale[0], scale[1], scale[2]);
-        const rotationM = FBXFileLoader._eulerToMatrixXYZ(rotation[0] * d2r, rotation[1] * d2r, rotation[2] * d2r);
-        return scaleM.multiply(rotationM);
+        return computeFBXGeometricDeltaMatrix(rotation, scale);
     }
 
     private static _computeFBXGeometricNormalMatrix(
         rotation: [number, number, number],
         scale: [number, number, number]
     ): Matrix {
-        const d2r = Math.PI / 180;
-        const inverseScaleM = Matrix.Scaling(
-            scale[0] === 0 ? 0 : 1 / scale[0],
-            scale[1] === 0 ? 0 : 1 / scale[1],
-            scale[2] === 0 ? 0 : 1 / scale[2]
-        );
-        const rotationM = FBXFileLoader._eulerToMatrixXYZ(rotation[0] * d2r, rotation[1] * d2r, rotation[2] * d2r);
-        return inverseScaleM.multiply(rotationM);
+        return computeFBXGeometricNormalMatrix(rotation, scale);
     }
 
     /**
@@ -1353,82 +1419,18 @@ export class FBXFileLoader implements ISceneLoaderPluginAsync {
         scalingOffset: [number, number, number],
         rotationOrder: number = 0
     ): Matrix {
-        const d2r = Math.PI / 180;
-
-        // Check if we can use the simplified path (no pivots/offsets/postRotation)
-        const hasPivots =
-            rotationPivot[0] !== 0 || rotationPivot[1] !== 0 || rotationPivot[2] !== 0 ||
-            scalingPivot[0] !== 0 || scalingPivot[1] !== 0 || scalingPivot[2] !== 0;
-        const hasOffsets =
-            rotationOffset[0] !== 0 || rotationOffset[1] !== 0 || rotationOffset[2] !== 0 ||
-            scalingOffset[0] !== 0 || scalingOffset[1] !== 0 || scalingOffset[2] !== 0;
-        const hasPostRot =
-            postRotation[0] !== 0 || postRotation[1] !== 0 || postRotation[2] !== 0;
-
-        if (!hasPivots && !hasOffsets && !hasPostRot) {
-            // Simple path: T * Rpre * R * S
-            // Note: PreRotation always uses XYZ order per FBX spec
-            const preRotM = FBXFileLoader._eulerToMatrixXYZ(
-                preRotation[0] * d2r, preRotation[1] * d2r, preRotation[2] * d2r
-            );
-            const lclRotM = FBXFileLoader._eulerToMatrix(
-                rotation[0] * d2r, rotation[1] * d2r, rotation[2] * d2r, rotationOrder
-            );
-            const translationM = Matrix.Translation(translation[0], translation[1], translation[2]);
-            const rotationM = lclRotM.multiply(preRotM);
-            const scaleM = Matrix.Scaling(scale[0], scale[1], scale[2]);
-            return scaleM.multiply(rotationM).multiply(translationM);
-        }
-
-        // Full FBX transform chain:
-        // M = T * Roff * Rp * Rpre * R * Rpost^-1 * Rp^-1 * Soff * Sp * S * Sp^-1
-        const T = Matrix.Translation(translation[0], translation[1], translation[2]);
-        const Roff = Matrix.Translation(rotationOffset[0], rotationOffset[1], rotationOffset[2]);
-        const Rp = Matrix.Translation(rotationPivot[0], rotationPivot[1], rotationPivot[2]);
-        const RpInv = Matrix.Translation(-rotationPivot[0], -rotationPivot[1], -rotationPivot[2]);
-        const Soff = Matrix.Translation(scalingOffset[0], scalingOffset[1], scalingOffset[2]);
-        const Sp = Matrix.Translation(scalingPivot[0], scalingPivot[1], scalingPivot[2]);
-        const SpInv = Matrix.Translation(-scalingPivot[0], -scalingPivot[1], -scalingPivot[2]);
-
-        // PreRotation and PostRotation always use XYZ per FBX spec
-        const Rpre = FBXFileLoader._eulerToMatrixXYZ(
-            preRotation[0] * d2r, preRotation[1] * d2r, preRotation[2] * d2r
-        );
-        // Lcl Rotation uses the node's RotationOrder
-        const R = FBXFileLoader._eulerToMatrix(
-            rotation[0] * d2r, rotation[1] * d2r, rotation[2] * d2r, rotationOrder
-        );
-        const S = Matrix.Scaling(scale[0], scale[1], scale[2]);
-
-        // PostRotation is inverted in the chain
-        let RpostInv: Matrix;
-        if (hasPostRot) {
-            const Rpost = FBXFileLoader._eulerToMatrixXYZ(
-                postRotation[0] * d2r, postRotation[1] * d2r, postRotation[2] * d2r
-            );
-            RpostInv = new Matrix();
-            Rpost.invertToRef(RpostInv);
-        } else {
-            RpostInv = Matrix.Identity();
-        }
-
-        // Row-vector convention: v' = v * S * Sp^-1 * Soff * Rp^-1 * Rpost^-1 * R * Rpre * Rp * Roff * T
-        // Which reverses to: M = T * Roff * Rp * Rpre * R * Rpost^-1 * Rp^-1 * Soff * Sp * S * Sp^-1
-        // In multiply order (rightmost applied first to row vector):
-        // result = SpInv * S * Sp * Soff * RpInv * RpostInv * R * Rpre * Rp * Roff * T
-        let result = SpInv;
-        result = result.multiply(S);
-        result = result.multiply(Sp);
-        result = result.multiply(Soff);
-        result = result.multiply(RpInv);
-        result = result.multiply(RpostInv);
-        result = result.multiply(R);
-        result = result.multiply(Rpre);
-        result = result.multiply(Rp);
-        result = result.multiply(Roff);
-        result = result.multiply(T);
-
-        return result;
+        return computeFBXLocalMatrix({
+            translation,
+            rotation,
+            scale,
+            preRotation,
+            postRotation,
+            rotationPivot,
+            scalingPivot,
+            rotationOffset,
+            scalingOffset,
+            rotationOrder,
+        });
     }
 
     /**
@@ -1600,7 +1602,37 @@ export class FBXFileLoader implements ISceneLoaderPluginAsync {
             let targetFound = false;
             for (const mesh of meshes) {
                 if (!mesh.morphTargetManager || targetFound) continue;
-                const channelMap = (mesh.metadata as Record<string, unknown> | undefined)?.fbxBlendShapeChannelIds as Map<bigint, number> | undefined;
+                const metadata = mesh.metadata as Record<string, unknown> | undefined;
+                const channelTargets = metadata?.fbxBlendShapeChannelTargets as Map<bigint, { targetIndices: number[]; fullWeights: number[] | null }> | undefined;
+                const targetInfo = channelTargets?.get(targetChannelId);
+                if (targetInfo && curveNode.curves.length > 0) {
+                    const fps = 30;
+                    for (let shapeIndex = 0; shapeIndex < targetInfo.targetIndices.length; shapeIndex++) {
+                        const target = mesh.morphTargetManager.getTarget(targetInfo.targetIndices[shapeIndex]);
+                        if (!target) continue;
+                        const anim = new Animation(
+                            `${target.name}_influence`, "influence", fps,
+                            Animation.ANIMATIONTYPE_FLOAT, Animation.ANIMATIONLOOPMODE_CYCLE
+                        );
+                        const keys = buildScalarAnimationKeys(
+                            curveNode.curves[0],
+                            fps,
+                            animStack.startTime,
+                            animStack.stopTime,
+                            (value) => calculateBlendShapeInfluences(
+                                value,
+                                targetInfo.fullWeights,
+                                targetInfo.targetIndices.length
+                            )[shapeIndex] ?? 0
+                        );
+                        anim.setKeys(keys);
+                        animGroup.addTargetedAnimation(anim, target);
+                    }
+                    targetFound = true;
+                    continue;
+                }
+
+                const channelMap = metadata?.fbxBlendShapeChannelIds as Map<bigint, number> | undefined;
                 if (!channelMap) continue;
                 const targetIndex = channelMap.get(targetChannelId);
                 if (targetIndex === undefined) continue;
@@ -1617,7 +1649,7 @@ export class FBXFileLoader implements ISceneLoaderPluginAsync {
                         fps,
                         animStack.startTime,
                         animStack.stopTime,
-                        (value) => value / 100 // FBX uses 0-100, Babylon uses 0-1
+                        (value) => value / 100
                     );
                     anim.setKeys(keys);
                     animGroup.addTargetedAnimation(anim, target);
@@ -2132,6 +2164,122 @@ function float64To32(arr: Float64Array): Float32Array {
         result[i] = arr[i];
     }
     return result;
+}
+
+function buildMorphTargetData(
+    shape: FBXShapeData,
+    cpIndices: Uint32Array,
+    basePositions: FloatArray,
+    baseNormals: FloatArray | null,
+    deltaMatrix: Matrix | null,
+    normalMatrix: Matrix | null,
+    unitScaleFactor: number
+): { positions: Float32Array; normals: Float32Array | null } | null {
+    const vertexCount = basePositions.length / 3;
+    const targetPositions = new Float32Array(vertexCount * 3);
+    const hasNormals = shape.normals !== null && baseNormals !== null;
+    const targetNormals = hasNormals ? new Float32Array(vertexCount * 3) : null;
+
+    for (let i = 0; i < targetPositions.length; i++) {
+        targetPositions[i] = basePositions[i];
+    }
+    if (targetNormals && baseNormals) {
+        for (let i = 0; i < targetNormals.length; i++) {
+            targetNormals[i] = baseNormals[i];
+        }
+    }
+
+    const cpToShapeIdx = new Map<number, number>();
+    for (let i = 0; i < shape.indices.length; i++) {
+        cpToShapeIdx.set(shape.indices[i], i);
+    }
+
+    for (let vi = 0; vi < vertexCount; vi++) {
+        const cpIdx = cpIndices[vi];
+        const shapeIdx = cpToShapeIdx.get(cpIdx);
+        if (shapeIdx === undefined) continue;
+
+        let dx = shape.vertices[shapeIdx * 3];
+        let dy = shape.vertices[shapeIdx * 3 + 1];
+        let dz = shape.vertices[shapeIdx * 3 + 2];
+
+        if (deltaMatrix) {
+            const rv = Vector3.TransformNormal(new Vector3(dx, dy, dz), deltaMatrix);
+            dx = rv.x; dy = rv.y; dz = rv.z;
+        }
+
+        if (unitScaleFactor !== 1) {
+            dx *= unitScaleFactor;
+            dy *= unitScaleFactor;
+            dz *= unitScaleFactor;
+        }
+
+        targetPositions[vi * 3] += dx;
+        targetPositions[vi * 3 + 1] += dy;
+        targetPositions[vi * 3 + 2] += dz;
+
+        if (targetNormals && shape.normals) {
+            let nx = shape.normals[shapeIdx * 3];
+            let ny = shape.normals[shapeIdx * 3 + 1];
+            let nz = shape.normals[shapeIdx * 3 + 2];
+            if (normalMatrix) {
+                const rn = Vector3.TransformNormal(new Vector3(nx, ny, nz), normalMatrix);
+                if (rn.lengthSquared() > 0) {
+                    rn.normalize();
+                }
+                nx = rn.x; ny = rn.y; nz = rn.z;
+            }
+            targetNormals[vi * 3] += nx;
+            targetNormals[vi * 3 + 1] += ny;
+            targetNormals[vi * 3 + 2] += nz;
+        }
+    }
+
+    return { positions: targetPositions, normals: targetNormals };
+}
+
+function calculateBlendShapeInfluences(
+    deformPercent: number,
+    fullWeights: number[] | null,
+    shapeCount: number
+): number[] {
+    if (shapeCount <= 0) return [];
+    if (!fullWeights || fullWeights.length !== shapeCount || shapeCount === 1) {
+        const denominator = fullWeights?.[0] && fullWeights[0] !== 0 ? fullWeights[0] : 100;
+        return [clamp01(deformPercent / denominator)];
+    }
+
+    const influences = new Array<number>(shapeCount).fill(0);
+    if (deformPercent <= fullWeights[0]) {
+        influences[0] = fullWeights[0] === 0
+            ? (deformPercent <= 0 ? 1 : 0)
+            : clamp01(deformPercent / fullWeights[0]);
+        return influences;
+    }
+
+    for (let i = 1; i < fullWeights.length; i++) {
+        const previousWeight = fullWeights[i - 1];
+        const nextWeight = fullWeights[i];
+        if (deformPercent > nextWeight) continue;
+
+        const range = nextWeight - previousWeight;
+        if (Math.abs(range) < 1e-6) {
+            influences[i] = 1;
+            return influences;
+        }
+
+        const t = clamp01((deformPercent - previousWeight) / range);
+        influences[i - 1] = 1 - t;
+        influences[i] = t;
+        return influences;
+    }
+
+    influences[shapeCount - 1] = 1;
+    return influences;
+}
+
+function clamp01(value: number): number {
+    return Math.max(0, Math.min(1, value));
 }
 
 function collectAnimationSampleTimes(

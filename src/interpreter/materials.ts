@@ -1,7 +1,14 @@
 import type { FBXNode } from "../types/fbxTypes.js";
-import { findChildByName, getPropertyValue, findChildrenByName, cleanFBXName } from "../types/fbxTypes.js";
+import { findChildByName, getPropertyValue, cleanFBXName } from "../types/fbxTypes.js";
 import type { FBXObjectMap } from "./connections.js";
 import { getChildren } from "./connections.js";
+import {
+    getPropertyTemplate,
+    resolvePropertyValue,
+    resolvePropertyValues,
+    type FBXPropertyTemplate,
+    type FBXPropertyTemplateMap,
+} from "./propertyTemplates.js";
 
 /** Parsed material data */
 export interface FBXMaterialData {
@@ -55,83 +62,55 @@ export interface FBXTextureRef {
 export function extractMaterial(
     materialNode: FBXNode,
     materialId: bigint,
-    objectMap: FBXObjectMap
+    objectMap: FBXObjectMap,
+    templates?: FBXPropertyTemplateMap
 ): FBXMaterialData {
     const name = cleanFBXName(getPropertyValue<string>(materialNode, 1) ?? "Material");
+    const template = getMaterialTemplate(materialNode, templates);
 
     // Determine Lambert vs Phong from ShadingModel property
     const shadingModel = findChildByName(materialNode, "ShadingModel");
     const shadingType = shadingModel
         ? (getPropertyValue<string>(shadingModel, 0) ?? "Lambert")
-        : "Lambert";
+        : resolvePropertyValue<string>(materialNode, template, "ShadingModel") ?? "Lambert";
     const type: "Lambert" | "Phong" =
         shadingType.toLowerCase() === "phong" ? "Phong" : "Lambert";
 
     // Extract properties from Properties70
-    const properties = extractMaterialProperties(materialNode);
+    const properties = extractMaterialProperties(materialNode, template);
 
     // Find connected textures
-    const textures = extractTextures(materialId, objectMap);
+    const textureTemplate = templates
+        ? getPropertyTemplate(templates, "Texture", "FbxFileTexture") ?? getPropertyTemplate(templates, "Texture")
+        : undefined;
+    const textures = extractTextures(materialId, objectMap, textureTemplate);
 
     return { id: materialId, name, type, properties, textures };
 }
 
-function extractMaterialProperties(materialNode: FBXNode): FBXMaterialProperties {
+function extractMaterialProperties(materialNode: FBXNode, template?: FBXPropertyTemplate): FBXMaterialProperties {
     const props: FBXMaterialProperties = {};
-    const props70 = findChildByName(materialNode, "Properties70");
-    if (!props70) return props;
-
-    for (const p of props70.children) {
-        if (p.name !== "P") continue;
-        const propName = getPropertyValue<string>(p, 0);
-        if (!propName) continue;
-
-        switch (propName) {
-            case "DiffuseColor":
-            case "Diffuse":
-                props.diffuseColor = getColor3(p, 4);
-                break;
-            case "DiffuseFactor":
-                props.diffuseFactor = getNumberProp(p, 4);
-                break;
-            case "AmbientColor":
-            case "Ambient":
-                props.ambientColor = getColor3(p, 4);
-                break;
-            case "AmbientFactor":
-                props.ambientFactor = getNumberProp(p, 4);
-                break;
-            case "SpecularColor":
-            case "Specular":
-                props.specularColor = getColor3(p, 4);
-                break;
-            case "SpecularFactor":
-                props.specularFactor = getNumberProp(p, 4);
-                break;
-            case "Shininess":
-            case "ShininessExponent":
-                props.shininess = getNumberProp(p, 4);
-                break;
-            case "EmissiveColor":
-            case "Emissive":
-                props.emissiveColor = getColor3(p, 4);
-                break;
-            case "EmissiveFactor":
-                props.emissiveFactor = getNumberProp(p, 4);
-                break;
-            case "Opacity":
-                props.opacity = getNumberProp(p, 4);
-                break;
-            case "TransparencyFactor":
-                props.transparencyFactor = getNumberProp(p, 4);
-                break;
-        }
-    }
+    props.diffuseColor = getColorProperty(materialNode, template, "DiffuseColor")
+        ?? getColorProperty(materialNode, template, "Diffuse");
+    props.diffuseFactor = getNumberProperty(materialNode, template, "DiffuseFactor");
+    props.ambientColor = getColorProperty(materialNode, template, "AmbientColor")
+        ?? getColorProperty(materialNode, template, "Ambient");
+    props.ambientFactor = getNumberProperty(materialNode, template, "AmbientFactor");
+    props.specularColor = getColorProperty(materialNode, template, "SpecularColor")
+        ?? getColorProperty(materialNode, template, "Specular");
+    props.specularFactor = getNumberProperty(materialNode, template, "SpecularFactor");
+    props.shininess = getNumberProperty(materialNode, template, "Shininess")
+        ?? getNumberProperty(materialNode, template, "ShininessExponent");
+    props.emissiveColor = getColorProperty(materialNode, template, "EmissiveColor")
+        ?? getColorProperty(materialNode, template, "Emissive");
+    props.emissiveFactor = getNumberProperty(materialNode, template, "EmissiveFactor");
+    props.opacity = getNumberProperty(materialNode, template, "Opacity");
+    props.transparencyFactor = getNumberProperty(materialNode, template, "TransparencyFactor");
 
     return props;
 }
 
-function extractTextures(materialId: bigint, objectMap: FBXObjectMap): FBXTextureRef[] {
+function extractTextures(materialId: bigint, objectMap: FBXObjectMap, template?: FBXPropertyTemplate): FBXTextureRef[] {
     const textures: FBXTextureRef[] = [];
     const textureChildren = getChildren(objectMap, materialId, "Texture");
 
@@ -149,27 +128,14 @@ function extractTextures(materialId: bigint, objectMap: FBXObjectMap): FBXTextur
         let uvScaling: [number, number] | undefined;
         let uvRotation: number | undefined;
         let uvSetName: string | undefined;
-        const texProps70 = findChildByName(node, "Properties70");
-        if (texProps70) {
-            for (const p of texProps70.children) {
-                if (p.name !== "P") continue;
-                const pName = getPropertyValue<string>(p, 0);
-                if (pName === "UVTranslation" || pName === "Translation") {
-                    const u = toNumber(p.properties[4]?.value);
-                    const v = toNumber(p.properties[5]?.value);
-                    if (u !== undefined && v !== undefined) uvTranslation = [u, v];
-                } else if (pName === "UVScaling" || pName === "Scaling") {
-                    const u = toNumber(p.properties[4]?.value);
-                    const v = toNumber(p.properties[5]?.value);
-                    if (u !== undefined && v !== undefined) uvScaling = [u, v];
-                } else if (pName === "UVRotation" || pName === "Rotation") {
-                    uvRotation = toNumber(p.properties[4]?.value);
-                } else if (pName === "UVSet") {
-                    const value = p.properties[4]?.value;
-                    if (typeof value === "string" && value.length > 0) uvSetName = value;
-                }
-            }
-        }
+        uvTranslation = getTextureVector2(node, template, "UVTranslation")
+            ?? getTextureVector2(node, template, "Translation");
+        uvScaling = getTextureVector2(node, template, "UVScaling")
+            ?? getTextureVector2(node, template, "Scaling");
+        uvRotation = getNumberProperty(node, template, "UVRotation")
+            ?? getNumberProperty(node, template, "Rotation");
+        const uvSet = resolvePropertyValue<string>(node, template, "UVSet");
+        if (uvSet && uvSet.length > 0) uvSetName = uvSet;
         uvTranslation ??= getNumberPairChild(node, "ModelUVTranslation");
         uvScaling ??= getNumberPairChild(node, "ModelUVScaling");
 
@@ -206,18 +172,55 @@ function extractTextures(materialId: bigint, objectMap: FBXObjectMap): FBXTextur
 
 // ── Helpers ────────────────────────────────────────────────────────────────────
 
-function getColor3(node: FBXNode, startIndex: number): [number, number, number] | undefined {
-    if (node.properties.length <= startIndex + 2) return undefined;
-    const r = toNumber(node.properties[startIndex].value);
-    const g = toNumber(node.properties[startIndex + 1].value);
-    const b = toNumber(node.properties[startIndex + 2].value);
+function getMaterialTemplate(materialNode: FBXNode, templates: FBXPropertyTemplateMap | undefined): FBXPropertyTemplate | undefined {
+    if (!templates) return undefined;
+
+    const shadingModel = findChildByName(materialNode, "ShadingModel");
+    const shadingType = shadingModel ? getPropertyValue<string>(shadingModel, 0) : undefined;
+    if (shadingType?.toLowerCase() === "phong") {
+        return getPropertyTemplate(templates, "Material", "FbxSurfacePhong")
+            ?? getPropertyTemplate(templates, "Material");
+    }
+    if (shadingType?.toLowerCase() === "lambert") {
+        return getPropertyTemplate(templates, "Material", "FbxSurfaceLambert")
+            ?? getPropertyTemplate(templates, "Material");
+    }
+
+    return getPropertyTemplate(templates, "Material");
+}
+
+function getColorProperty(
+    node: FBXNode,
+    template: FBXPropertyTemplate | undefined,
+    propertyName: string
+): [number, number, number] | undefined {
+    const values = resolvePropertyValues(node, template, propertyName);
+    if (!values || values.length < 3) return undefined;
+    const r = toNumber(values[0]);
+    const g = toNumber(values[1]);
+    const b = toNumber(values[2]);
     if (r === undefined || g === undefined || b === undefined) return undefined;
     return [r, g, b];
 }
 
-function getNumberProp(node: FBXNode, index: number): number | undefined {
-    if (index >= node.properties.length) return undefined;
-    return toNumber(node.properties[index].value);
+function getNumberProperty(
+    node: FBXNode,
+    template: FBXPropertyTemplate | undefined,
+    propertyName: string
+): number | undefined {
+    return toNumber(resolvePropertyValue(node, template, propertyName));
+}
+
+function getTextureVector2(
+    node: FBXNode,
+    template: FBXPropertyTemplate | undefined,
+    propertyName: string
+): [number, number] | undefined {
+    const values = resolvePropertyValues(node, template, propertyName);
+    if (!values) return undefined;
+    const u = toNumber(values[0]);
+    const v = toNumber(values[1]);
+    return u !== undefined && v !== undefined ? [u, v] : undefined;
 }
 
 function toNumber(value: unknown): number | undefined {

@@ -12,15 +12,56 @@ export interface FBXConnection {
     propertyName?: string;
 }
 
+export interface FBXObjectEntry {
+    id: bigint;
+    node: FBXNode;
+    source: "Objects" | "legacySyntheticGeometry";
+    legacyName?: string;
+    synthetic: boolean;
+}
+
+export interface FBXConnectionEntry {
+    source: "C" | "Connect";
+    rawType?: string;
+    childId?: bigint;
+    parentId?: bigint;
+    propertyName?: string;
+    accepted: boolean;
+}
+
+export type FBXConnectionDiagnosticReason =
+    | "unsupported-connection-type"
+    | "missing-connection-endpoint"
+    | "unresolved-legacy-endpoint"
+    | "unresolved-object-reference"
+    | "duplicate-parent"
+    | "self-loop";
+
+export interface FBXConnectionDiagnostic {
+    reason: FBXConnectionDiagnosticReason;
+    message: string;
+    connectionIndex?: number;
+    type?: string;
+    childId?: bigint;
+    parentId?: bigint;
+    propertyName?: string;
+}
+
 export interface FBXObjectMap {
     /** All objects by their unique ID */
     objects: Map<bigint, FBXNode>;
+    /** Object table entries, including synthetic compatibility objects */
+    objectEntries: FBXObjectEntry[];
     /** Children of each object ID */
     childrenOf: Map<bigint, { id: bigint; propertyName?: string }[]>;
     /** Parent of each object ID */
     parentOf: Map<bigint, { id: bigint; propertyName?: string }>;
     /** Raw connection list */
     connections: FBXConnection[];
+    /** Raw connection-table entries and whether they were accepted into the graph */
+    connectionEntries: FBXConnectionEntry[];
+    /** Unsupported or suspicious connection shapes encountered while preserving graph behavior */
+    diagnostics: FBXConnectionDiagnostic[];
 }
 
 /**
@@ -29,10 +70,14 @@ export interface FBXObjectMap {
  */
 export function resolveConnections(doc: FBXDocument): FBXObjectMap {
     const objects = new Map<bigint, FBXNode>();
+    const objectEntries: FBXObjectEntry[] = [];
     const childrenOf = new Map<bigint, { id: bigint; propertyName?: string }[]>();
     const parentOf = new Map<bigint, { id: bigint; propertyName?: string }>();
     const connections: FBXConnection[] = [];
+    const connectionEntries: FBXConnectionEntry[] = [];
+    const diagnostics: FBXConnectionDiagnostic[] = [];
     const legacyIds = new Map<string, bigint>();
+    const syntheticLegacyIds = new Map<string, Map<string, bigint>>();
     let nextLegacyId = -1n;
 
     const getLegacyId = (name: string): bigint => {
@@ -40,6 +85,21 @@ export function resolveConnections(doc: FBXDocument): FBXObjectMap {
         if (id === undefined) {
             id = nextLegacyId--;
             legacyIds.set(name, id);
+        }
+        return id;
+    };
+
+    const getSyntheticLegacyId = (role: string, name: string): bigint => {
+        let idsByName = syntheticLegacyIds.get(role);
+        if (!idsByName) {
+            idsByName = new Map();
+            syntheticLegacyIds.set(role, idsByName);
+        }
+
+        let id = idsByName.get(name);
+        if (id === undefined) {
+            id = nextLegacyId--;
+            idsByName.set(name, id);
         }
         return id;
     };
@@ -53,16 +113,20 @@ export function resolveConnections(doc: FBXDocument): FBXObjectMap {
                 const id = toBigInt(idProp.value);
                 if (id !== undefined) {
                     objects.set(id, obj);
+                    objectEntries.push({ id, node: obj, source: "Objects", synthetic: false });
                 } else if (typeof idProp.value === "string") {
                     const legacyName = cleanFBXName(idProp.value);
                     const id = getLegacyId(legacyName);
                     const normalized = normalizeLegacyObject(obj, id);
                     objects.set(id, normalized);
+                    objectEntries.push({ id, node: normalized, source: "Objects", legacyName, synthetic: false });
 
                     if (obj.name === "Model" && getPropertyValue<string>(obj, 1) === "Mesh") {
-                        const geometryId = getLegacyId(`${legacyName}\0Geometry`);
-                        objects.set(geometryId, createLegacyGeometry(obj, geometryId));
-                        addConnection(connections, childrenOf, parentOf, "OO", geometryId, id);
+                        const geometryId = getSyntheticLegacyId("Geometry", legacyName);
+                        const geometry = createLegacyGeometry(obj, geometryId);
+                        objects.set(geometryId, geometry);
+                        objectEntries.push({ id: geometryId, node: geometry, source: "legacySyntheticGeometry", legacyName, synthetic: true });
+                        addConnection(connections, childrenOf, parentOf, diagnostics, "OO", geometryId, id);
                     }
                 }
             }
@@ -75,26 +139,98 @@ export function resolveConnections(doc: FBXDocument): FBXObjectMap {
         for (const c of connectionsNode.children) {
             if (c.name !== "C" && c.name !== "Connect") continue;
 
-            const type = getPropertyValue<string>(c, 0) as ConnectionType;
+            const connectionIndex = connectionEntries.length;
+            const type = getPropertyValue<string>(c, 0);
             const childIdRaw = c.properties[1]?.value;
             const parentIdRaw = c.properties[2]?.value;
+            const entry: FBXConnectionEntry = {
+                source: c.name,
+                rawType: type,
+                accepted: false,
+            };
+            connectionEntries.push(entry);
 
-            if (childIdRaw === undefined || parentIdRaw === undefined) continue;
+            if (type !== "OO" && type !== "OP") {
+                diagnostics.push({
+                    reason: "unsupported-connection-type",
+                    message: `Unsupported FBX connection type '${type ?? ""}' was not added to the graph.`,
+                    connectionIndex,
+                    type,
+                });
+                continue;
+            }
+
+            if (childIdRaw === undefined || parentIdRaw === undefined) {
+                diagnostics.push({
+                    reason: "missing-connection-endpoint",
+                    message: "FBX connection is missing a child or parent endpoint.",
+                    connectionIndex,
+                    type,
+                });
+                continue;
+            }
 
             const childId = toObjectId(childIdRaw, legacyIds);
             const parentId = toObjectId(parentIdRaw, legacyIds);
-            if (childId === undefined || parentId === undefined) continue;
+            if (childId === undefined || parentId === undefined) {
+                diagnostics.push({
+                    reason: "unresolved-legacy-endpoint",
+                    message: "FBX connection references a legacy string endpoint that is not present in the object table.",
+                    connectionIndex,
+                    type,
+                });
+                continue;
+            }
 
             const propertyName =
                 type === "OP" && c.properties.length > 3
                     ? getPropertyValue<string>(c, 3)
                     : undefined;
 
-            addConnection(connections, childrenOf, parentOf, type, childId, parentId, propertyName);
+            entry.childId = childId;
+            entry.parentId = parentId;
+            entry.propertyName = propertyName;
+
+            if (childId === parentId) {
+                diagnostics.push({
+                    reason: "self-loop",
+                    message: "FBX connection references the same object as child and parent.",
+                    connectionIndex,
+                    type,
+                    childId,
+                    parentId,
+                    propertyName,
+                });
+            }
+            if (!objects.has(childId)) {
+                diagnostics.push({
+                    reason: "unresolved-object-reference",
+                    message: "FBX connection child ID is not present in the object table.",
+                    connectionIndex,
+                    type,
+                    childId,
+                    parentId,
+                    propertyName,
+                });
+            }
+            if (parentId !== 0n && !objects.has(parentId)) {
+                diagnostics.push({
+                    reason: "unresolved-object-reference",
+                    message: "FBX connection parent ID is not present in the object table.",
+                    connectionIndex,
+                    type,
+                    childId,
+                    parentId,
+                    propertyName,
+                });
+            }
+
+            addConnection(connections, childrenOf, parentOf, diagnostics, type, childId, parentId, propertyName, connectionIndex);
+            entry.accepted = true;
         }
     }
 
-    return { objects, childrenOf, parentOf, connections };
+    return { objects, objectEntries, childrenOf, parentOf, connections, connectionEntries, diagnostics };
 }
 
 /** Get all child objects of a given parent ID, optionally filtered by node name */
@@ -135,10 +271,12 @@ function addConnection(
     connections: FBXConnection[],
     childrenOf: Map<bigint, { id: bigint; propertyName?: string }[]>,
     parentOf: Map<bigint, { id: bigint; propertyName?: string }>,
+    diagnostics: FBXConnectionDiagnostic[],
     type: ConnectionType,
     childId: bigint,
     parentId: bigint,
-    propertyName?: string
+    propertyName?: string,
+    connectionIndex?: number
 ): void {
     connections.push({ type, childId, parentId, propertyName });
 
@@ -146,6 +284,18 @@ function addConnection(
         childrenOf.set(parentId, []);
     }
     childrenOf.get(parentId)!.push({ id: childId, propertyName });
+    const existingParent = parentOf.get(childId);
+    if (existingParent) {
+        diagnostics.push({
+            reason: "duplicate-parent",
+            message: "FBX object has multiple parents; preserving the existing last-parent behavior.",
+            connectionIndex,
+            type,
+            childId,
+            parentId,
+            propertyName,
+        });
+    }
     parentOf.set(childId, { id: parentId, propertyName });
 }
 
