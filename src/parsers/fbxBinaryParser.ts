@@ -1,5 +1,5 @@
-import * as pako from "pako";
 import type { FBXDocument, FBXNode, FBXProperty, FBXPropertyType } from "../types/fbxTypes.js";
+import { inflateZlib } from "./zlibInflate.js";
 
 const FBX_MAGIC = "Kaydara FBX Binary  \0";
 const HEADER_SIZE = 27; // 21 magic + 2 padding + 4 version uint32
@@ -75,6 +75,7 @@ function parseNode(
     const name = decodeASCII(bytes, offset + headerSize, nameLen);
 
     let cursor = offset + headerSize + nameLen;
+    const propertiesStart = cursor;
 
     // Parse properties
     const properties: FBXProperty[] = [];
@@ -82,6 +83,9 @@ function parseNode(
         const result = parseProperty(view, bytes, cursor);
         properties.push(result.property);
         cursor = result.nextOffset;
+    }
+    if (cursor !== propertiesStart + propertyListLen) {
+        throw new Error(`Invalid FBX property list length for node '${name}' at offset ${offset}`);
     }
 
     // Parse nested child nodes (between end of properties and endOffset)
@@ -167,7 +171,7 @@ function parseProperty(view: DataView, bytes: Uint8Array, offset: number): Parse
         case "l":
             return parseArrayProperty(view, bytes, offset, "int64[]", 8);
         case "b":
-            return parseArrayProperty(view, bytes, offset, "boolean[]", 4);
+            return parseArrayProperty(view, bytes, offset, "boolean[]", 1);
         default:
             throw new Error(`Unknown FBX property type: '${typeCode}' at offset ${offset - 1}`);
     }
@@ -184,14 +188,21 @@ function parseArrayProperty(
     const encoding = view.getUint32(offset + 4, true); // 0=raw, 1=zlib
     const compressedLength = view.getUint32(offset + 8, true);
     offset += 12;
+    const expectedByteLength = arrayLength * elementSize;
 
     let arrayData: Uint8Array;
     if (encoding === 1) {
         // zlib compressed
-        const compressed = bytes.slice(offset, offset + compressedLength);
-        arrayData = pako.inflate(compressed);
+        const compressed = bytes.subarray(offset, offset + compressedLength);
+        arrayData = inflateZlib(compressed, expectedByteLength);
     } else {
-        arrayData = bytes.slice(offset, offset + arrayLength * elementSize);
+        if (encoding !== 0) {
+            throw new Error(`Unsupported FBX array encoding: ${encoding}`);
+        }
+        if (compressedLength !== expectedByteLength) {
+            throw new Error(`Invalid FBX array byte length for ${type}`);
+        }
+        arrayData = bytes.slice(offset, offset + compressedLength);
     }
 
     const arrayBuffer = arrayData.buffer.slice(
@@ -199,7 +210,7 @@ function parseArrayProperty(
         arrayData.byteOffset + arrayData.byteLength
     );
 
-    let value: Float32Array | Float64Array | Int32Array | BigInt64Array;
+    let value: Float32Array | Float64Array | Int32Array | BigInt64Array | Uint8Array;
     switch (type) {
         case "float32[]":
             value = new Float32Array(arrayBuffer);
@@ -208,8 +219,10 @@ function parseArrayProperty(
             value = new Float64Array(arrayBuffer);
             break;
         case "int32[]":
-        case "boolean[]":
             value = new Int32Array(arrayBuffer);
+            break;
+        case "boolean[]":
+            value = arrayData;
             break;
         case "int64[]":
             value = new BigInt64Array(arrayBuffer);

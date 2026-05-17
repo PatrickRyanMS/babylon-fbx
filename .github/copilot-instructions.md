@@ -26,7 +26,7 @@ Two-layer design:
 - **Connections**: FBX uses a flat object list + `Connections` section. `OO` = object-to-object, `OP` = object-to-property (e.g. texture → material's "DiffuseColor").
 - **Polygon indices**: `PolygonVertexIndex` uses negative-index-minus-one (`-(idx+1)`) to mark polygon boundaries.
 - **Layer elements**: Normals/UVs use mapping modes (`ByPolygonVertex`, `ByControlPoint`, `AllSame`) and reference modes (`Direct`, `IndexToDirect`).
-- **Compressed arrays**: Binary FBX may zlib-compress large float/int arrays (decoded with `pako`).
+- **Compressed arrays**: Binary FBX may zlib-compress large float/int arrays (decoded by the internal parser-layer zlib inflater).
 
 ## Conventions
 

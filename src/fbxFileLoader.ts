@@ -1059,7 +1059,7 @@ export class FBXFileLoader implements ISceneLoaderPluginAsync {
             undefined,
             () => {
                 const fallbackUrl = fallbackUrls[fallbackIndex++];
-                if (fallbackUrl) {
+                if (fallbackUrl && texture.getScene()) {
                     texture.updateURL(fallbackUrl);
                 }
             }

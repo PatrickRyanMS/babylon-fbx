@@ -28,7 +28,7 @@ export type FBXPropertyType =
     | "float64[]" // 'd'
     | "int32[]" // 'i'
     | "int64[]" // 'l'
-    | "boolean[]"; // 'b' (stored as Int32Array where 0=false, 1=true)
+    | "boolean[]"; // 'b' (stored as Uint8Array where 0=false, 1=true)
 
 export interface FBXProperty {
     type: FBXPropertyType;
