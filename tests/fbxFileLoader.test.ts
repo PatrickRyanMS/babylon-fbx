@@ -300,6 +300,38 @@ describe("FBXFileLoader", () => {
         engine.dispose();
     });
 
+    it("clones culling-off materials without mutating shared cached materials", () => {
+        const engine = new NullEngine();
+        const scene = new Scene(engine);
+        const material = new StandardMaterial("SharedMaterial", scene);
+        const getModelMaterial = (FBXFileLoader as unknown as {
+            _getModelMaterial: (
+                material: StandardMaterial,
+                model: FBXModelData,
+                cullingCloneCache?: Map<StandardMaterial, StandardMaterial>,
+                cloneCullingOffMaterial?: boolean
+            ) => StandardMaterial;
+        })._getModelMaterial;
+
+        const model = createModel({ cullingOff: true });
+        const cloneCache = new Map<StandardMaterial, StandardMaterial>();
+        const first = getModelMaterial(material, model, cloneCache);
+        const second = getModelMaterial(material, model, cloneCache);
+
+        expect(first).not.toBe(material);
+        expect(first).toBe(second);
+        expect(first.backFaceCulling).toBe(false);
+        expect(material.backFaceCulling).toBe(true);
+
+        const exclusiveMaterial = new StandardMaterial("ExclusiveMaterial", scene);
+        const exclusive = getModelMaterial(exclusiveMaterial, model, undefined, false);
+        expect(exclusive).toBe(exclusiveMaterial);
+        expect(exclusiveMaterial.backFaceCulling).toBe(false);
+
+        scene.dispose();
+        engine.dispose();
+    });
+
     it("applies camera and light fidelity metadata without conflating spot inner and outer angles", () => {
         const engine = new NullEngine();
         const scene = new Scene(engine);

@@ -1,25 +1,22 @@
 /**
  * Visual test script — loads each model in the viewer and captures a screenshot.
- * Run: npx tsx tests/scripts/visual-test.ts
- * Prerequisites: Dev server running on localhost:5174
+ * Run: npm run viewer, then npx tsx tests/scripts/visual-test.ts
  */
 import { chromium } from "playwright";
 import * as path from "path";
 import * as fs from "fs";
 
-const BASE_URL = "http://localhost:5174";
+const BASE_URL = process.env.VIEWER_URL ?? "http://localhost:5173";
 const OUTPUT_DIR = path.resolve("tests/scripts/visual-output");
 
-// Model indices in the viewer dropdown (0-based)
 const MODELS_TO_TEST = [
-    { index: 0, name: "spider-fbx" },
-    { index: 1, name: "spider-glb" },
-    { index: 2, name: "valkyrie-binary" },
-    { index: 5, name: "phoenix" },
-    { index: 6, name: "ww1-plane" },
-    { index: 7, name: "hover-bike" },
-    { index: 8, name: "mech-drone" },
-    { index: 4, name: "cat" },
+    { locator: "spider-animated-character/Spider_sketchfab.fbx", name: "spider-fbx" },
+    { locator: "spider-animated-character/spider_animated_character.glb", name: "spider-glb" },
+    { locator: "valkyrie/valkyrie_asset.fbx", name: "valkyrie-binary" },
+    { locator: "behemot-cat/LowPoly_Cat_V04.fbx", name: "behemot-cat" },
+    { locator: "stylized-mangrove-greenhouse/Mangrove Greenhouse.fbx", name: "mangrove-greenhouse" },
+    { locator: "the-last-stronghold-animated/Floating_Gate_Chinese1.fbx", name: "last-stronghold" },
+    { locator: "spartan-armour-mkv-halo-reach/Spartan_Sketchfab.fbx", name: "spartan-fbx" },
 ];
 
 async function main() {
@@ -29,46 +26,21 @@ async function main() {
     const context = await browser.newContext({ viewport: { width: 1280, height: 800 } });
     const page = await context.newPage();
 
-    // Navigate to viewer
-    await page.goto(BASE_URL);
-    // Wait for initial model to load
-    await page.waitForFunction(
-        () => {
-            const s = document.getElementById("status");
-            return s && s.textContent && s.textContent.startsWith("Loaded:");
-        },
-        { timeout: 30000 }
-    );
-    // Wait a bit for rendering to settle
-    await page.waitForTimeout(2000);
-
-    // Hide the inspector to get a clean view
-    const inspBtn = page.locator("button", { hasText: "Inspector" });
-    if (await inspBtn.isVisible()) {
-        await inspBtn.click();
-        await page.waitForTimeout(500);
-    }
-
     for (const model of MODELS_TO_TEST) {
-        console.log(`Capturing: ${model.name} (index ${model.index})...`);
+        console.log(`Capturing: ${model.name}...`);
 
-        // Select model from dropdown
-        const select = page.locator("#modelSelect");
-        await select.selectOption(String(model.index));
+        const url = new URL(BASE_URL);
+        url.searchParams.set("model", model.locator);
+        await page.goto(url.href);
+        await waitForModelLoad(page);
 
-        // Wait for load to complete
-        await page.waitForFunction(
-            () => {
-                const s = document.getElementById("status");
-                return s && s.textContent && s.textContent.startsWith("Loaded:");
-            },
-            { timeout: 30000 }
-        );
-
-        // Let the scene render for a moment
+        const inspectorButton = page.locator("button", { hasText: "Inspector" });
+        if (await inspectorButton.isVisible()) {
+            await inspectorButton.click();
+            await page.waitForTimeout(500);
+        }
         await page.waitForTimeout(2000);
 
-        // Capture screenshot
         const screenshotPath = path.join(OUTPUT_DIR, `${model.name}.png`);
         await page.screenshot({ path: screenshotPath });
         console.log(`  Saved: ${screenshotPath}`);
@@ -76,6 +48,16 @@ async function main() {
 
     await browser.close();
     console.log("\nDone! Screenshots saved to:", OUTPUT_DIR);
+}
+
+async function waitForModelLoad(page: import("playwright").Page): Promise<void> {
+    await page.waitForFunction(
+        () => {
+            const status = document.getElementById("status");
+            return status?.textContent?.startsWith("Loaded:");
+        },
+        { timeout: 60000 }
+    );
 }
 
 main().catch((err) => {

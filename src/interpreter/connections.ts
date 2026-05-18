@@ -151,11 +151,15 @@ export function resolveConnections(doc: FBXDocument): FBXObjectMap {
             connectionEntries.push(entry);
 
             if (type !== "OO" && type !== "OP") {
+                const childId = childIdRaw === undefined ? undefined : toObjectId(childIdRaw, legacyIds);
+                const parentId = parentIdRaw === undefined ? undefined : toObjectId(parentIdRaw, legacyIds);
                 diagnostics.push({
                     reason: "unsupported-connection-type",
                     message: `Unsupported FBX connection type '${type ?? ""}' was not added to the graph.`,
                     connectionIndex,
                     type,
+                    childId,
+                    parentId,
                 });
                 continue;
             }

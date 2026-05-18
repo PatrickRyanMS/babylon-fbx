@@ -217,6 +217,8 @@ export class FBXFileLoader implements ISceneLoaderPluginAsync {
             }
         };
         collectModelData(fbxScene.rootModels);
+        const cullingConflictMaterialIds = FBXFileLoader._collectCullingConflictMaterialIds(fbxScene.rootModels);
+        const cullingMaterialCloneCache = new Map<StandardMaterial, StandardMaterial>();
 
         // Build the FBX hierarchy under the same handedness conversion root that
         // Babylon's glTF loader uses when loading right-handed assets into a
@@ -255,7 +257,9 @@ export class FBXFileLoader implements ISceneLoaderPluginAsync {
                 skeletonByGeometryId,
                 skinByGeometryId,
                 skinBindingByGeometryId,
-                modelIdToNode
+                modelIdToNode,
+                cullingConflictMaterialIds,
+                cullingMaterialCloneCache
             );
         }
 
@@ -393,7 +397,9 @@ export class FBXFileLoader implements ISceneLoaderPluginAsync {
         skeletonByGeometryId: Map<bigint, Skeleton>,
         skinByGeometryId: Map<bigint, FBXSkinData>,
         skinBindingByGeometryId: Map<bigint, FBXSkinBindingData>,
-        modelIdToNode: Map<bigint, TransformNode>
+        modelIdToNode: Map<bigint, TransformNode>,
+        cullingConflictMaterialIds: Set<bigint>,
+        cullingMaterialCloneCache: Map<StandardMaterial, StandardMaterial>
     ): void {
         const localMatrix = FBXFileLoader._computeFBXModelLocalMatrix(model);
         const fbxWorldMatrix = localMatrix.multiply(parentFBXWorldMatrix);
@@ -437,14 +443,23 @@ export class FBXFileLoader implements ISceneLoaderPluginAsync {
             // Apply material(s)
             if (model.materials.length > 1 && model.geometry?.materialIndices) {
                 // Multi-material: create sub-meshes for each material
-                this._applyMultiMaterial(mesh, model, materialCache, scene);
+                this._applyMultiMaterial(
+                    mesh,
+                    model,
+                    materialCache,
+                    scene,
+                    cullingConflictMaterialIds,
+                    cullingMaterialCloneCache
+                );
             } else if (model.materials.length > 0) {
                 const mat = materialCache.get(model.materials[0].id);
                 if (mat) {
-                    if (model.cullingOff) {
-                        mat.backFaceCulling = false;
-                    }
-                    mesh.material = mat;
+                    mesh.material = FBXFileLoader._getModelMaterial(
+                        mat,
+                        model,
+                        cullingMaterialCloneCache,
+                        cullingConflictMaterialIds.has(model.materials[0].id)
+                    );
                 }
             }
 
@@ -460,7 +475,7 @@ export class FBXFileLoader implements ISceneLoaderPluginAsync {
 
             // Recurse children
             for (const child of model.children) {
-                this._buildModel(child, scene, mesh, assetRoot, fbxWorldMatrix, materialCache, nameFilter, meshes, transformNodes, skeletonByGeometryId, skinByGeometryId, skinBindingByGeometryId, modelIdToNode);
+                this._buildModel(child, scene, mesh, assetRoot, fbxWorldMatrix, materialCache, nameFilter, meshes, transformNodes, skeletonByGeometryId, skinByGeometryId, skinBindingByGeometryId, modelIdToNode, cullingConflictMaterialIds, cullingMaterialCloneCache);
             }
         } else {
             // Transform node (Null type or no geometry)
@@ -479,7 +494,7 @@ export class FBXFileLoader implements ISceneLoaderPluginAsync {
 
             // Recurse children
             for (const child of model.children) {
-                this._buildModel(child, scene, transformNode, assetRoot, fbxWorldMatrix, materialCache, nameFilter, meshes, transformNodes, skeletonByGeometryId, skinByGeometryId, skinBindingByGeometryId, modelIdToNode);
+                this._buildModel(child, scene, transformNode, assetRoot, fbxWorldMatrix, materialCache, nameFilter, meshes, transformNodes, skeletonByGeometryId, skinByGeometryId, skinBindingByGeometryId, modelIdToNode, cullingConflictMaterialIds, cullingMaterialCloneCache);
             }
         }
     }
@@ -650,7 +665,9 @@ export class FBXFileLoader implements ISceneLoaderPluginAsync {
         mesh: Mesh,
         model: FBXModelData,
         materialCache: Map<bigint, StandardMaterial>,
-        scene: Scene
+        scene: Scene,
+        cullingConflictMaterialIds: Set<bigint>,
+        cullingMaterialCloneCache: Map<StandardMaterial, StandardMaterial>
     ): void {
         const matIndices = model.geometry!.materialIndices!;
         const indices = mesh.getIndices();
@@ -696,8 +713,12 @@ export class FBXFileLoader implements ISceneLoaderPluginAsync {
             if (fbxMat) {
                 const mat = materialCache.get(fbxMat.id);
                 if (mat) {
-                    if (model.cullingOff) mat.backFaceCulling = false;
-                    multiMat.subMaterials.push(mat);
+                    multiMat.subMaterials.push(FBXFileLoader._getModelMaterial(
+                        mat,
+                        model,
+                        cullingMaterialCloneCache,
+                        cullingConflictMaterialIds.has(fbxMat.id)
+                    ));
                 } else {
                     multiMat.subMaterials.push(null);
                 }
@@ -715,6 +736,54 @@ export class FBXFileLoader implements ISceneLoaderPluginAsync {
             const range = subMeshRanges[i];
             new SubMesh(i, 0, vertexCount, range.start, range.count, mesh);
         }
+    }
+
+    private static _collectCullingConflictMaterialIds(models: FBXModelData[]): Set<bigint> {
+        // Deliberately scan the full scene, not just name-filtered models. This
+        // can over-clone for filtered imports, but avoids shared culling state.
+        const usage = new Map<bigint, { cullingOff: boolean; cullingOn: boolean }>();
+        const collect = (model: FBXModelData): void => {
+            for (const material of model.materials) {
+                const state = usage.get(material.id) ?? { cullingOff: false, cullingOn: false };
+                if (model.cullingOff) {
+                    state.cullingOff = true;
+                } else {
+                    state.cullingOn = true;
+                }
+                usage.set(material.id, state);
+            }
+            for (const child of model.children) collect(child);
+        };
+        for (const model of models) collect(model);
+
+        const conflicts = new Set<bigint>();
+        for (const [materialId, state] of usage) {
+            if (state.cullingOff && state.cullingOn) {
+                conflicts.add(materialId);
+            }
+        }
+        return conflicts;
+    }
+
+    private static _getModelMaterial(
+        material: StandardMaterial,
+        model: FBXModelData,
+        cullingCloneCache?: Map<StandardMaterial, StandardMaterial>,
+        cloneCullingOffMaterial = true
+    ): StandardMaterial {
+        if (!model.cullingOff || !material.backFaceCulling) return material;
+        if (!cloneCullingOffMaterial) {
+            material.backFaceCulling = false;
+            return material;
+        }
+
+        const cached = cullingCloneCache?.get(material);
+        if (cached) return cached;
+
+        const clone = material.clone(`${material.name}_CullingOff`);
+        clone.backFaceCulling = false;
+        cullingCloneCache?.set(material, clone);
+        return clone;
     }
 
     private _applyMaterialUVSetCoordinates(

@@ -18,6 +18,7 @@ export interface FBXSceneDiagnostic {
     objectName?: string;
     nodeName?: string;
     subType?: string;
+    /** Number of accepted parent graph edges for objectId, when objectId is known. */
     parentCount?: number;
     childCount?: number;
 }
@@ -37,7 +38,9 @@ export function extractSceneDiagnostics(objectMap: FBXObjectMap): FBXSceneDiagno
         message: diagnostic.message,
         objectId: diagnostic.childId,
         subType: diagnostic.reason,
-        parentCount: diagnostic.parentId === undefined ? undefined : 1,
+        parentCount: diagnostic.childId === undefined
+            ? undefined
+            : objectMap.connections.filter((connection) => connection.childId === diagnostic.childId).length,
     }));
 
     for (const [id, node] of objectMap.objects) {

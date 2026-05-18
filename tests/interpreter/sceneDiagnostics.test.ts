@@ -46,6 +46,7 @@ describe("FBX scene diagnostics", () => {
         expect(scene.diagnostics).toContainEqual(expect.objectContaining({
             type: "connection-graph",
             subType: "unsupported-connection-type",
+            parentCount: 0,
         }));
     });
 });
