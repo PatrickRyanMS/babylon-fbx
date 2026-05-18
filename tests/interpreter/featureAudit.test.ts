@@ -102,12 +102,12 @@ describe("FBX feature audit fixtures", () => {
         expect(textureRefs.some((texture) => texture.propertyName === "Maya|TEX_brdf_lut")).toBe(true);
     });
 
-    it("parses non-default InheritType and surfaces runtime-gated diagnostics", () => {
+    it("parses non-default InheritType and treats handled Rrs inheritance without diagnostics", () => {
         expect(countNonDefaultInheritTypes(aishaPath)).toBe(307);
         expect(countNonDefaultInheritTypes(spiderPath)).toBe(47);
         expect(countNonDefaultInheritTypes(behemotPath)).toBe(2);
         expect(countNonDefaultInheritTypes(strongholdPath)).toBe(0);
-        expect(countNonDefaultInheritTypeDiagnostics(behemotPath)).toBe(2);
+        expect(countNonDefaultInheritTypeDiagnostics(behemotPath)).toBe(0);
     });
 });
 

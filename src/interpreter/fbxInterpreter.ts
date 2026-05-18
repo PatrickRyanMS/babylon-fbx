@@ -339,7 +339,7 @@ function extractTransform(modelNode: FBXNode, template?: FBXPropertyTemplate): {
     const geometricScaling = resolveVector3Property(modelNode, template, "GeometricScaling", [1, 1, 1]);
     const rotationOrder = resolveNumberProperty(modelNode, template, "RotationOrder", 0);
     const inheritType = resolveNumberProperty(modelNode, template, "InheritType", 1);
-    const diagnostics = inheritType !== 1
+    const diagnostics = inheritType !== 1 && inheritType !== 2
         ? [`InheritType ${inheritType} is parsed and preserved; runtime parent-scale inheritance remains gated to avoid changing existing visual behavior without a fixture-specific baseline.`]
         : [];
 

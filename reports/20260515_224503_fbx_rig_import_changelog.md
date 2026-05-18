@@ -257,6 +257,17 @@ Calling Babylon APIs in a way that made bind matrices overwrite local animation/
 - Absolute bind/inverse bind: derived from `TransformLink`, BindPose, or rest fallback.
 - `bone.updateMatrix(localBind, false, false)` updates bind data without changing the local animation basis.
 
+### Baked animation samples are not authored Hermite curves
+
+Cloud Station later exposed an animation-pop failure that looked like an unsupported curve-node gap but was actually two separate issues:
+
+- Dense baked curves were carrying cubic-looking FBX key flags.
+- `InheritType = 2` scale compensation was being collapsed into one matrix and decomposed back to TRS.
+
+The curve-side learning is that sampled/baked animation should be evaluated as linear samples, even if exporter metadata includes cubic flags. The interpreter now detects known Maya sampled curves by `FbxMayaSample Curve`, and also detects Blender-style frame-baked curves without relying on that name. The generic detector requires enough keys, uniform spacing near a common frame cadence, and no meaningful cubic tangent deviation.
+
+Do not use density alone as the rule. Dense authored cubic curves can be valid. Sparse curves and dense curves with meaningful tangents should preserve Cubic/Hermite interpolation.
+
 ### Mesh pose matrix and root conversion must stay in the same bind-space convention
 
 Including the scene/root conversion parent in the skinned mesh pose matrix caused the skin to disagree with the skeleton. The current passing convention keeps skinned mesh pose in the mesh's own FBX transform space and leaves scene/root conversion out of that pose matrix.

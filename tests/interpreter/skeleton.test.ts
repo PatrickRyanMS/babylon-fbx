@@ -4,7 +4,7 @@ import { resolve, dirname } from "path";
 import { fileURLToPath } from "url";
 import { parseBinaryFBX } from "../../src/parsers/fbxBinaryParser.js";
 import { interpretFBX } from "../../src/interpreter/fbxInterpreter.js";
-import { sampleFBXCurveAtTime } from "../../src/interpreter/animation.js";
+import { isFrameBakedSampledCurve, sampleFBXCurveAtTime } from "../../src/interpreter/animation.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -182,6 +182,37 @@ describe("Skeleton extraction", () => {
         expect(cubicFrame18!).toBeGreaterThan(linearFrame18);
     });
 
+    it("should evaluate baked sampled curves as linear samples", () => {
+        const value = sampleFBXCurveAtTime({
+            channel: "d|X",
+            isSampled: true,
+            keys: [
+                { time: 0, value: 0, interpolation: "cubic", rightSlope: 0, nextLeftSlope: 0 },
+                { time: 1, value: 1, interpolation: "cubic", rightSlope: 0, nextLeftSlope: 0 },
+            ],
+        }, 0.25);
+
+        expect(value).toBeCloseTo(0.25, 6);
+    });
+
+    it("should identify Blender-style frame-baked curves as sampled data", () => {
+        const keys = createCurveKeys(12, 1 / 30, (i) => Math.sin(i / 4), "cubic", 0, 0);
+
+        expect(isFrameBakedSampledCurve(keys)).toBe(true);
+    });
+
+    it("should preserve sparse cubic curves even when tangents are present", () => {
+        const keys = createCurveKeys(6, 2 / 30, (i) => i, "cubic", 20, -20);
+
+        expect(isFrameBakedSampledCurve(keys)).toBe(false);
+    });
+
+    it("should preserve dense authored cubic curves with meaningful tangents", () => {
+        const keys = createCurveKeys(12, 1 / 30, (i) => i / 10, "cubic", 60, -60);
+
+        expect(isFrameBakedSampledCurve(keys)).toBe(false);
+    });
+
     it("should resolve Aisha skins to a shared deformation rig", () => {
         const scene = loadAisha();
         const bodySkin = scene.skins.find((skin) => skin.id === 2377474450000n);
@@ -246,6 +277,23 @@ describe("Skeleton extraction", () => {
         }
     });
 });
+
+function createCurveKeys(
+    count: number,
+    intervalSeconds: number,
+    valueAtIndex: (index: number) => number,
+    interpolation: "constant" | "linear" | "cubic",
+    rightSlope?: number,
+    nextLeftSlope?: number
+) {
+    return Array.from({ length: count }, (_, i) => ({
+        time: i * intervalSeconds,
+        value: valueAtIndex(i),
+        interpolation,
+        rightSlope,
+        nextLeftSlope,
+    }));
+}
 
 describe("Animation extraction", () => {
     it("should extract 8 animation stacks from spider model", () => {

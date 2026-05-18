@@ -13,7 +13,7 @@ describe("FBX property template runtime fallback", () => {
         expect(root.scale).toEqual([2, 3, 4]);
         expect(root.geometricTranslation).toEqual([1, 2, 3]);
         expect(root.inheritType).toBe(2);
-        expect(root.diagnostics[0]).toContain("InheritType 2");
+        expect(root.diagnostics).toEqual([]);
         expect(material.type).toBe("Phong");
         expect(material.properties.diffuseColor).toEqual([0.2, 0.3, 0.4]);
         expect(material.properties.shininess).toBe(25);

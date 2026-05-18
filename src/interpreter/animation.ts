@@ -6,6 +6,13 @@ import { getChildren } from "./connections.js";
 /** FBX time units: 46186158000 ticks per second */
 const FBX_TIME_UNIT = 46186158000;
 const KEY_ATTR_DATA_STRIDE = 4;
+const SAMPLED_CURVE_MIN_KEY_COUNT = 8;
+const SAMPLED_CURVE_MAX_INTERVAL_SECONDS = 1 / 23;
+const SAMPLED_CURVE_UNIFORM_TOLERANCE_RATIO = 0.05;
+const SAMPLED_CURVE_LINEAR_DEVIATION_RATIO = 0.01;
+const SAMPLED_CURVE_LINEAR_DEVIATION_ABSOLUTE = 1e-4;
+const SAMPLED_CURVE_DEGENERATE_SLOPE_ABSOLUTE = 1e-5;
+const SAMPLED_CURVE_COMMON_FPS = [24, 25, 30, 48, 50, 60, 100, 120];
 
 export type FBXInterpolationType = "constant" | "linear" | "cubic";
 
@@ -31,6 +38,8 @@ export interface FBXCurveData {
     channel: string;
     /** Keyframes */
     keys: FBXKeyframe[];
+    /** True for baked sample curves that should be connected as linear samples */
+    isSampled?: boolean;
 }
 
 /** An animation curve node (T/R/S for one bone) */
@@ -459,7 +468,8 @@ function extractCurves(curveNodeId: bigint, objectMap: FBXObjectMap): FBXCurveDa
             const channel = conn.propertyName ?? "d|X";
             const keys = extractKeyframes(curveNode);
             if (keys.length > 0) {
-                curves.push({ channel, keys });
+                const isSampled = isSampledAnimationCurve(curveNode, keys);
+                curves.push({ channel, keys: isSampled ? makeLinearSampleKeys(keys) : keys, isSampled });
             }
         }
     }
@@ -472,7 +482,8 @@ function extractCurves(curveNodeId: bigint, objectMap: FBXObjectMap): FBXCurveDa
         for (let i = 0; i < ooChildren.length && i < 3; i++) {
             const keys = extractKeyframes(ooChildren[i].node);
             if (keys.length > 0) {
-                curves.push({ channel: channelNames[i], keys });
+                const isSampled = isSampledAnimationCurve(ooChildren[i].node, keys);
+                curves.push({ channel: channelNames[i], keys: isSampled ? makeLinearSampleKeys(keys) : keys, isSampled });
             }
         }
     }
@@ -536,6 +547,98 @@ function extractKeyframes(curveNode: FBXNode): FBXKeyframe[] {
     return keys;
 }
 
+function isSampledAnimationCurve(curveNode: FBXNode, keys: readonly FBXKeyframe[]): boolean {
+    const rawName = getPropertyValue<string>(curveNode, 1) ?? "";
+    return cleanFBXName(rawName) === "FbxMayaSample Curve" || isFrameBakedSampledCurve(keys);
+}
+
+export function isFrameBakedSampledCurve(keys: readonly FBXKeyframe[]): boolean {
+    if (keys.length < SAMPLED_CURVE_MIN_KEY_COUNT) return false;
+
+    const deltas: number[] = [];
+    for (let i = 1; i < keys.length; i++) {
+        const delta = keys[i].time - keys[i - 1].time;
+        if (!(delta > 0)) return false;
+        deltas.push(delta);
+    }
+
+    const averageDelta = deltas.reduce((sum, delta) => sum + delta, 0) / deltas.length;
+    if (averageDelta > SAMPLED_CURVE_MAX_INTERVAL_SECONDS) return false;
+
+    const uniformTolerance = Math.max(1e-6, averageDelta * SAMPLED_CURVE_UNIFORM_TOLERANCE_RATIO);
+    if (deltas.some((delta) => Math.abs(delta - averageDelta) > uniformTolerance)) return false;
+
+    const sampledFps = 1 / averageDelta;
+    const matchesCommonFps = SAMPLED_CURVE_COMMON_FPS.some((fps) =>
+        Math.abs(sampledFps - fps) <= Math.max(0.25, fps * 0.02)
+    );
+    if (!matchesCommonFps) return false;
+
+    return !hasMeaningfulCubicTangents(keys);
+}
+
+function makeLinearSampleKeys(keys: FBXKeyframe[]): FBXKeyframe[] {
+    return keys.map((key) => ({
+        time: key.time,
+        value: key.value,
+        interpolation: "linear",
+    }));
+}
+
+function hasMeaningfulCubicTangents(keys: readonly FBXKeyframe[]): boolean {
+    let hasCubicSegment = false;
+    let hasCompleteTangents = true;
+    let allSlopesDegenerate = true;
+    let minValue = Number.POSITIVE_INFINITY;
+    let maxValue = Number.NEGATIVE_INFINITY;
+    let maxLinearDeviation = 0;
+
+    for (const key of keys) {
+        minValue = Math.min(minValue, key.value);
+        maxValue = Math.max(maxValue, key.value);
+    }
+
+    for (let i = 0; i < keys.length - 1; i++) {
+        const key = keys[i];
+        const nextKey = keys[i + 1];
+        if (key.interpolation !== "cubic") continue;
+
+        hasCubicSegment = true;
+        const segmentDuration = nextKey.time - key.time;
+        if (!(segmentDuration > 0)) continue;
+
+        const linearSlope = (nextKey.value - key.value) / segmentDuration;
+        const rightSlope = key.rightSlope;
+        const nextLeftSlope = key.nextLeftSlope;
+        if (rightSlope === undefined || nextLeftSlope === undefined) {
+            hasCompleteTangents = false;
+            continue;
+        }
+
+        if (
+            Math.abs(rightSlope) > SAMPLED_CURVE_DEGENERATE_SLOPE_ABSOLUTE ||
+            Math.abs(nextLeftSlope) > SAMPLED_CURVE_DEGENERATE_SLOPE_ABSOLUTE
+        ) {
+            allSlopesDegenerate = false;
+        }
+
+        for (const t of [0.25, 0.5, 0.75]) {
+            const cubic = cubicHermite(key.value, nextKey.value, rightSlope, nextLeftSlope, segmentDuration, t);
+            const linear = key.value + t * segmentDuration * linearSlope;
+            maxLinearDeviation = Math.max(maxLinearDeviation, Math.abs(cubic - linear));
+        }
+    }
+
+    if (!hasCubicSegment || !hasCompleteTangents || allSlopesDegenerate) return false;
+
+    const range = maxValue - minValue;
+    const deviationTolerance = Math.max(
+        SAMPLED_CURVE_LINEAR_DEVIATION_ABSOLUTE,
+        range * SAMPLED_CURVE_LINEAR_DEVIATION_RATIO
+    );
+    return maxLinearDeviation > deviationTolerance;
+}
+
 export function sampleFBXCurveAtTime(
     curveData: FBXCurveData | undefined,
     time: number
@@ -560,7 +663,7 @@ export function sampleFBXCurveAtTime(
         const segmentDuration = nextKey.time - key.time;
         const t = (time - key.time) / segmentDuration;
 
-        if (key.interpolation === "cubic") {
+        if (key.interpolation === "cubic" && !curveData.isSampled) {
             const linearSlope = (nextKey.value - key.value) / segmentDuration;
             const rightSlope = key.rightSlope ?? linearSlope;
             const nextLeftSlope = key.nextLeftSlope ?? linearSlope;

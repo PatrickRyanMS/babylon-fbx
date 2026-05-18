@@ -112,7 +112,7 @@ Key source areas:
 - Cameras and lights with fidelity metadata for unsupported or diagnostic-only properties.
 - Skinned meshes, bind poses, bind-rest correction for severe local/bind scale mismatches, cluster weights, shared rig resolution, and more than four bone influences via Babylon extra skinning buffers.
 - Blend shapes and in-between shape weights.
-- Animation stacks, layers, curve nodes, curve key metadata, and Babylon animation groups.
+- Animation stacks, layers, curve nodes, curve key metadata, sampled/baked curve detection, and Babylon animation groups.
 - Scene/model/animation/skinning diagnostics for unsupported or runtime-gated FBX features.
 
 ## Known limitations
@@ -172,4 +172,5 @@ Coverage includes:
 - Add fixture regression coverage when changing parser or interpreter behavior.
 - Use viewer overrides only for local visual/debug presentation issues; avoid encoding viewer-only asset fixes into the loader.
 - Preserve diagnostics for unsupported FBX features instead of silently dropping them.
+- Treat frame-baked sampled animation curves as linear samples when they are dense, uniformly spaced at a common frame cadence, and lack meaningful cubic tangent deviation; preserve Cubic/Hermite interpolation for sparse curves and dense curves with meaningful tangents.
 - Before pushing repo changes, review and update this README when behavior, fixtures, diagnostics, commands, or workflow details have changed.

@@ -275,6 +275,32 @@ describe("FBXFileLoader", () => {
         engine.dispose();
     });
 
+    it("maps Lambert materials to diffuse-only StandardMaterial shading", () => {
+        const engine = new NullEngine();
+        const scene = new Scene(engine);
+        const loader = new FBXFileLoader() as unknown as {
+            _createMaterial: (matData: FBXMaterialData, scene: Scene, rootUrl: string) => StandardMaterial;
+        };
+
+        const material = loader._createMaterial({
+            id: 1n,
+            name: "LambertMaterial",
+            type: "Lambert",
+            properties: {
+                specularColor: [1, 1, 1],
+                specularFactor: 1,
+            },
+            textures: [],
+        }, scene, "");
+
+        expect(material.specularColor.r).toBe(0);
+        expect(material.specularColor.g).toBe(0);
+        expect(material.specularColor.b).toBe(0);
+
+        scene.dispose();
+        engine.dispose();
+    });
+
     it("maps opacity texture slots to alpha-test-and-blend materials", () => {
         const engine = new NullEngine();
         const scene = new Scene(engine);
@@ -396,11 +422,11 @@ describe("FBXFileLoader", () => {
 
         applyModelMetadata(node, createModel({
             customProperties: { ExportTag: "hero" },
-            diagnostics: ["InheritType 2 is runtime-gated."],
+            diagnostics: ["Synthetic model diagnostic."],
         }));
 
         expect((node.metadata as { fbxCustomProperties: { ExportTag: string } }).fbxCustomProperties.ExportTag).toBe("hero");
-        expect((node.metadata as { fbxDiagnostics: string[] }).fbxDiagnostics[0]).toContain("InheritType 2");
+        expect((node.metadata as { fbxDiagnostics: string[] }).fbxDiagnostics[0]).toContain("Synthetic model diagnostic");
 
         scene.dispose();
         engine.dispose();
@@ -532,6 +558,317 @@ describe("FBXFileLoader", () => {
         expect(helperScale.x).toBeCloseTo(100, 6);
         expect(helperScale.y).toBeCloseTo(100, 6);
         expect(helperScale.z).toBeCloseTo(100, 6);
+
+        scene.dispose();
+        engine.dispose();
+    });
+
+    it("compensates InheritType Rrs bones so child scale, but not child translation, cancels parent scale", () => {
+        const engine = new NullEngine();
+        const scene = new Scene(engine);
+        const loader = new FBXFileLoader() as unknown as {
+            _createSkeleton: (
+                skeletonId: string,
+                bones: FBXBoneData[],
+                scene: Scene
+            ) => import("@babylonjs/core/Bones/skeleton.js").Skeleton;
+        };
+
+        const skeleton = loader._createSkeleton("inherit-rrs", [
+            createBone({
+                modelId: 1n,
+                name: "ScaledParent",
+                scale: [2, 2, 2],
+            }),
+            createBone({
+                modelId: 2n,
+                name: "NoParentScaleChild",
+                index: 1,
+                parentIndex: 0,
+                translation: [1, 0, 0],
+                inheritType: 2,
+            }),
+        ], scene);
+        const child = expectBone(skeleton, "NoParentScaleChild");
+        const helper = expectBone(skeleton, "NoParentScaleChild__fbx_scaleCompensation");
+        const childLocalScale = new Vector3();
+        const childLocalRotation = new Quaternion();
+        const childLocalTranslation = new Vector3();
+        const helperLocalScale = new Vector3();
+        const helperLocalRotation = new Quaternion();
+        const helperLocalTranslation = new Vector3();
+        const childWorldScale = new Vector3();
+        const childWorldRotation = new Quaternion();
+        const childWorldTranslation = new Vector3();
+
+        expect(helper.getIndex()).toBe(-1);
+        child.getLocalMatrix().decompose(childLocalScale, childLocalRotation, childLocalTranslation);
+        helper.getLocalMatrix().decompose(helperLocalScale, helperLocalRotation, helperLocalTranslation);
+        child.getLocalMatrix()
+            .multiply(helper.getLocalMatrix())
+            .multiply(skeleton.bones[0].getLocalMatrix())
+            .decompose(childWorldScale, childWorldRotation, childWorldTranslation);
+
+        expect(childLocalTranslation.x).toBeCloseTo(0, 6);
+        expect(childLocalScale.x).toBeCloseTo(1, 6);
+        expect(childLocalScale.y).toBeCloseTo(1, 6);
+        expect(childLocalScale.z).toBeCloseTo(1, 6);
+        expect(helperLocalTranslation.x).toBeCloseTo(1, 6);
+        expect(helperLocalScale.x).toBeCloseTo(0.5, 6);
+        expect(helperLocalScale.y).toBeCloseTo(0.5, 6);
+        expect(helperLocalScale.z).toBeCloseTo(0.5, 6);
+        expect(childWorldTranslation.x).toBeCloseTo(2, 6);
+        expect(childWorldScale.x).toBeCloseTo(1, 6);
+        expect(childWorldScale.y).toBeCloseTo(1, 6);
+        expect(childWorldScale.z).toBeCloseTo(1, 6);
+
+        scene.dispose();
+        engine.dispose();
+    });
+
+    it("preserves child scale and rotation inheritance when compensating InheritType Rrs rest pose", () => {
+        const engine = new NullEngine();
+        const scene = new Scene(engine);
+        const loader = new FBXFileLoader() as unknown as {
+            _createSkeleton: (
+                skeletonId: string,
+                bones: FBXBoneData[],
+                scene: Scene
+            ) => import("@babylonjs/core/Bones/skeleton.js").Skeleton;
+        };
+
+        const skeleton = loader._createSkeleton("inherit-rrs-rotated", [
+            createBone({
+                modelId: 1n,
+                name: "NonUniformScaledRotatedParent",
+                rotation: [17, 29, 90],
+                scale: [1.3861, 1.1764, 1.1764],
+            }),
+            createBone({
+                modelId: 2n,
+                name: "OwnScaleChild",
+                index: 1,
+                parentIndex: 0,
+                translation: [1, 0, 0],
+                scale: [1.1794, 1.3048, 1.2464],
+                inheritType: 2,
+            }),
+        ], scene);
+        const parent = expectBone(skeleton, "NonUniformScaledRotatedParent");
+        const helper = expectBone(skeleton, "OwnScaleChild__fbx_scaleCompensation");
+        const child = expectBone(skeleton, "OwnScaleChild");
+        const childAbsolute = child.getLocalMatrix()
+            .multiply(helper.getLocalMatrix())
+            .multiply(parent.getLocalMatrix());
+        const childScale = new Vector3();
+        const childRotation = new Quaternion();
+        const childTranslation = new Vector3();
+
+        childAbsolute.decompose(childScale, childRotation, childTranslation);
+
+        expect(childScale.x).toBeCloseTo(1.1794, 4);
+        expect(childScale.y).toBeCloseTo(1.3048, 4);
+        expect(childScale.z).toBeCloseTo(1.2464, 4);
+        const childLocal = child.getLocalMatrix();
+        const childLocalScale = new Vector3();
+        const childLocalRotation = new Quaternion();
+        const childLocalTranslation = new Vector3();
+        childLocal.decompose(childLocalScale, childLocalRotation, childLocalTranslation);
+
+        expect(helper.getIndex()).toBe(-1);
+        expect(childLocalTranslation.x).toBeCloseTo(0, 6);
+        expect(childLocalTranslation.y).toBeCloseTo(0, 6);
+        expect(childLocalTranslation.z).toBeCloseTo(0, 6);
+
+        scene.dispose();
+        engine.dispose();
+    });
+
+    it("strips only immediate parent scale when compensating a nested InheritType Rrs child", () => {
+        const engine = new NullEngine();
+        const scene = new Scene(engine);
+        const loader = new FBXFileLoader() as unknown as {
+            _createSkeleton: (
+                skeletonId: string,
+                bones: FBXBoneData[],
+                scene: Scene
+            ) => import("@babylonjs/core/Bones/skeleton.js").Skeleton;
+        };
+
+        const skeleton = loader._createSkeleton("inherit-rrs-nested", [
+            createBone({
+                modelId: 1n,
+                name: "ScaledGrandparent",
+                scale: [2, 2, 2],
+            }),
+            createBone({
+                modelId: 2n,
+                name: "ScaleInheritingParent",
+                index: 1,
+                parentIndex: 0,
+                translation: [1, 0, 0],
+                scale: [3, 3, 3],
+            }),
+            createBone({
+                modelId: 3n,
+                name: "NoAncestorScaleChild",
+                index: 2,
+                parentIndex: 1,
+                translation: [1, 0, 0],
+                inheritType: 2,
+            }),
+        ], scene);
+        const child = expectBone(skeleton, "NoAncestorScaleChild");
+        const helper = expectBone(skeleton, "NoAncestorScaleChild__fbx_scaleCompensation");
+        const parent = expectBone(skeleton, "ScaleInheritingParent");
+        const grandparent = expectBone(skeleton, "ScaledGrandparent");
+        const childAbsolute = child.getLocalMatrix()
+            .multiply(helper.getLocalMatrix())
+            .multiply(parent.getLocalMatrix())
+            .multiply(grandparent.getLocalMatrix());
+        const childScale = new Vector3();
+        const childRotation = new Quaternion();
+        const childTranslation = new Vector3();
+
+        childAbsolute.decompose(childScale, childRotation, childTranslation);
+
+        expect(childScale.x).toBeCloseTo(2, 6);
+        expect(childScale.y).toBeCloseTo(2, 6);
+        expect(childScale.z).toBeCloseTo(2, 6);
+
+        scene.dispose();
+        engine.dispose();
+    });
+
+    it("compensates animated InheritType Rrs bones when sampling rig animations", () => {
+        const engine = new NullEngine();
+        const scene = new Scene(engine);
+        const loader = new FBXFileLoader() as unknown as {
+            _createSkeleton: (
+                skeletonId: string,
+                bones: FBXBoneData[],
+                scene: Scene
+            ) => import("@babylonjs/core/Bones/skeleton.js").Skeleton;
+            _createAnimationGroup: (
+                animStack: FBXAnimationStackData,
+                rigs: FBXRigData[],
+                skeletonByRigId: Map<string, import("@babylonjs/core/Bones/skeleton.js").Skeleton>,
+                scene: Scene,
+                modelIdToNode: Map<bigint, TransformNode>,
+                modelIdToData: Map<bigint, FBXModelData>,
+                meshes: Mesh[]
+            ) => AnimationGroup | null;
+        };
+        const bones = [
+            createBone({
+                modelId: 1n,
+                name: "ScaledParent",
+                scale: [2, 2, 2],
+            }),
+            createBone({
+                modelId: 2n,
+                name: "AnimatedNoParentScaleChild",
+                index: 1,
+                parentIndex: 0,
+                translation: [1, 0, 0],
+                inheritType: 2,
+            }),
+            createBone({
+                modelId: 3n,
+                name: "OrdinaryAnimatedSibling",
+                index: 2,
+                parentIndex: 0,
+                translation: [3, 0, 0],
+            }),
+        ];
+        const skeleton = loader._createSkeleton("animated-inherit-rrs", bones, scene);
+        const rig: FBXRigData = {
+            id: "rig",
+            rootModelIds: [1n],
+            bones,
+            modelIdToBoneIndex: new Map([[1n, 0], [2n, 1], [3n, 2]]),
+            clusterModelIds: new Set([2n, 3n]),
+            skinBindings: [],
+            warnings: [],
+        };
+        const animStack: FBXAnimationStackData = {
+            name: "SyntheticInheritAnimation",
+            startTime: 0,
+            stopTime: 1,
+            duration: 1,
+            curveNodes: [
+                createVariableCurveNode(1n, "S", [[2, 2, 2], [4, 4, 4]]),
+                createVariableCurveNode(2n, "T", [[1, 0, 0], [2, 0, 0]]),
+                createVariableCurveNode(2n, "R", [[0, 0, 0], [0, 90, 0]]),
+                createVariableCurveNode(3n, "T", [[3, 0, 0], [4, 0, 0]]),
+                createCurveNode(3n, "R", [0, 0, 0]),
+            ],
+            layers: [],
+            unsupportedCurveNodes: [],
+            diagnostics: [],
+        };
+
+        const group = loader._createAnimationGroup(
+            animStack,
+            [rig],
+            new Map([["rig", skeleton]]),
+            scene,
+            new Map(),
+            new Map([
+                [1n, createModel({ id: 1n, name: "ScaledParent", subType: "LimbNode", scale: [2, 2, 2] })],
+                [2n, createModel({ id: 2n, name: "AnimatedNoParentScaleChild", subType: "LimbNode", translation: [1, 0, 0], inheritType: 2 })],
+                [3n, createModel({ id: 3n, name: "OrdinaryAnimatedSibling", subType: "LimbNode", translation: [3, 0, 0] })],
+            ]),
+            []
+        );
+        const child = expectBone(skeleton, "AnimatedNoParentScaleChild");
+        const childHelper = expectBone(skeleton, "AnimatedNoParentScaleChild__fbx_scaleCompensation");
+        const sibling = expectBone(skeleton, "OrdinaryAnimatedSibling");
+        const childPosition = group!.targetedAnimations.find((targetedAnimation) =>
+            targetedAnimation.target === child &&
+            targetedAnimation.animation.targetProperty === "position"
+        );
+        expect(childPosition).toBeUndefined();
+
+        const helperPosition = group!.targetedAnimations.find((targetedAnimation) =>
+            targetedAnimation.target === childHelper &&
+            targetedAnimation.animation.targetProperty === "position"
+        );
+        expect(helperPosition).toBeDefined();
+        const keys = helperPosition!.animation.getKeys();
+        expect((keys[0].value as Vector3).x).toBeCloseTo(1, 6);
+        expect((keys[keys.length - 1].value as Vector3).x).toBeCloseTo(2, 6);
+
+        const helperScale = group!.targetedAnimations.find((targetedAnimation) =>
+            targetedAnimation.target === childHelper &&
+            targetedAnimation.animation.targetProperty === "scaling"
+        );
+        expect(helperScale).toBeDefined();
+        const helperScaleKeys = helperScale!.animation.getKeys();
+        expect((helperScaleKeys[0].value as Vector3).x).toBeCloseTo(0.5, 6);
+        expect((helperScaleKeys[helperScaleKeys.length - 1].value as Vector3).x).toBeCloseTo(0.25, 6);
+
+        const childRotation = group!.targetedAnimations.find((targetedAnimation) =>
+            targetedAnimation.target === child &&
+            targetedAnimation.animation.targetProperty === "rotationQuaternion"
+        );
+        expect(childRotation).toBeDefined();
+        const childRotationKeys = childRotation!.animation.getKeys();
+        const finalRotation = childRotationKeys[childRotationKeys.length - 1].value as Quaternion;
+        expect(Math.abs(Quaternion.Dot(finalRotation, Quaternion.FromEulerAngles(0, Math.PI / 2, 0)))).toBeCloseTo(1, 5);
+
+        const siblingPosition = group!.targetedAnimations.find((targetedAnimation) =>
+            targetedAnimation.target === sibling &&
+            targetedAnimation.animation.targetProperty === "position"
+        );
+        expect(siblingPosition).toBeDefined();
+        const siblingKeys = siblingPosition!.animation.getKeys();
+        expect((siblingKeys[0].value as Vector3).x).toBeCloseTo(3, 6);
+        expect((siblingKeys[siblingKeys.length - 1].value as Vector3).x).toBeCloseTo(4, 6);
+        expect(group!.targetedAnimations.some((targetedAnimation) =>
+            targetedAnimation.target === sibling &&
+            targetedAnimation.animation.targetProperty === "rotationQuaternion"
+        )).toBe(true);
 
         scene.dispose();
         engine.dispose();
@@ -1185,6 +1522,20 @@ function createCurveNode(targetModelId: bigint, type: "T" | "R" | "S", values: [
     };
 }
 
+function createVariableCurveNode(targetModelId: bigint, type: "T" | "R" | "S", values: [[number, number, number], [number, number, number]]): FBXCurveNodeData {
+    return {
+        type,
+        targetModelId,
+        curves: ["d|X", "d|Y", "d|Z"].map((channel, index) => ({
+            channel,
+            keys: [
+                { time: 0, value: values[0][index], interpolation: "linear" },
+                { time: 1, value: values[1][index], interpolation: "linear" },
+            ],
+        })),
+    };
+}
+
 function maxMatrixDifference(a: Matrix, b: Matrix): number {
     let maxDifference = 0;
     for (let i = 0; i < 16; i++) {
@@ -1199,6 +1550,15 @@ function getMatrixScale(matrix: Matrix): Vector3 {
     const translation = new Vector3();
     matrix.decompose(scale, rotation, translation);
     return scale;
+}
+
+function expectBone(
+    skeleton: import("@babylonjs/core/Bones/skeleton.js").Skeleton,
+    name: string
+): import("@babylonjs/core/Bones/bone.js").Bone {
+    const bone = skeleton.bones.find((candidate) => candidate.name === name);
+    expect(bone).toBeDefined();
+    return bone!;
 }
 
 function expectMeshCenter(scene: Scene, name: string, expected: [number, number, number]): void {

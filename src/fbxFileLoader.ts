@@ -65,6 +65,8 @@ export class FBXFileLoader implements ISceneLoaderPluginAsync {
     };
 
     private readonly _bindRestBones = new WeakSet<Bone>();
+    private readonly _sourceBonesBySkeleton = new WeakMap<Skeleton, Bone[]>();
+    private readonly _scaleCompensationHelpersBySkeleton = new WeakMap<Skeleton, Map<number, Bone>>();
 
     public async importMeshAsync(
         meshesNames: string | readonly string[] | null | undefined,
@@ -281,7 +283,7 @@ export class FBXFileLoader implements ISceneLoaderPluginAsync {
                 if (!boneData.isCluster) continue;
 
                 const boneNode = modelIdToNode.get(boneData.modelId);
-                const bone = skeleton.bones[boneData.index];
+                const bone = this._getSourceBone(skeleton, boneData.index);
                 if (!boneNode || !bone) continue;
 
                 // Find direct children of this bone's TransformNode that aren't bones themselves
@@ -992,6 +994,10 @@ export class FBXFileLoader implements ISceneLoaderPluginAsync {
         const hasTexture = (...slots: string[]): boolean =>
             matData.textures.some((texture) => slots.includes(texture.propertyName));
 
+        if (matData.type === "Lambert") {
+            material.specularColor = Color3.Black();
+        }
+
         if (props.diffuseColor) {
             const diffuseFactor = hasTexture("DiffuseColor", "Diffuse")
                 ? 1
@@ -1014,7 +1020,7 @@ export class FBXFileLoader implements ISceneLoaderPluginAsync {
             );
         }
 
-        if (props.specularColor) {
+        if (matData.type === "Phong" && props.specularColor) {
             const specularFactor = hasTexture("SpecularColor", "Specular", "Shininess", "ShininessExponent")
                 ? 1
                 : props.specularFactor ?? 1;
@@ -1436,9 +1442,11 @@ export class FBXFileLoader implements ISceneLoaderPluginAsync {
 
     private _createSkeleton(skeletonId: string, bones: FBXBoneData[], scene: Scene): Skeleton {
         const skeleton = new Skeleton("Skeleton", `skeleton_${skeletonId}`, scene);
-        const babylonBones: Bone[] = [];
+        const sourceBones: Bone[] = [];
+        const scaleCompensationHelpers = new Map<number, Bone>();
         const authoredLocalMatrices: Matrix[] = [];
         const authoredAbsoluteMatrices: Matrix[] = [];
+        const authoredRuntimeLocalMatrices: Matrix[] = [];
 
         // Compute authored Lcl matrices for bones that do not carry FBX bind data.
         for (let i = 0; i < bones.length; i++) {
@@ -1456,10 +1464,9 @@ export class FBXFileLoader implements ISceneLoaderPluginAsync {
                 boneData.rotationOrder
             );
             authoredLocalMatrices[i] = authoredLocal;
-            authoredAbsoluteMatrices[i] = boneData.parentIndex >= 0
-                ? authoredLocal.multiply(authoredAbsoluteMatrices[boneData.parentIndex])
-                : authoredLocal;
+            authoredRuntimeLocalMatrices[i] = FBXFileLoader._computeFBXRuntimeLocalMatrix(bones, authoredLocal, i);
         }
+        authoredAbsoluteMatrices.push(...FBXFileLoader._computeFBXAbsoluteMatrices(bones, authoredRuntimeLocalMatrices));
 
         const absoluteBindMatrices = bones.map((boneData, index) =>
             boneData.transformLinkMatrix
@@ -1488,8 +1495,31 @@ export class FBXFileLoader implements ISceneLoaderPluginAsync {
         // remapped into bind-rest space; ordinary child curves are already in
         // the expected local animation space.
         for (let i = 0; i < bones.length; i++) {
-            const localMatrix = useBindAsRest ? localBindMatrices[i] : authoredLocalMatrices[i];
-            const parentBone = bones[i].parentIndex >= 0 ? babylonBones[bones[i].parentIndex] : null;
+            let localMatrix = useBindAsRest ? localBindMatrices[i] : authoredRuntimeLocalMatrices[i];
+            let parentBone = bones[i].parentIndex >= 0 ? sourceBones[bones[i].parentIndex] : null;
+            if (!useBindAsRest && bones[i].inheritType === 2 && bones[i].parentIndex >= 0 && parentBone) {
+                const split = FBXFileLoader._splitParentScaleCompensatedLocalMatrix(
+                    authoredLocalMatrices[i],
+                    bones[bones[i].parentIndex].scale
+                );
+                const helper = new Bone(
+                    `${bones[i].name}__fbx_scaleCompensation`,
+                    skeleton,
+                    parentBone,
+                    split.helperLocalMatrix,
+                    split.helperLocalMatrix.clone(),
+                    Matrix.Identity(),
+                    -1
+                );
+                helper.metadata = {
+                    ...(helper.metadata as object ?? {}),
+                    fbxScaleCompensationForBoneIndex: i,
+                    fbxScaleCompensationForBoneName: bones[i].name,
+                };
+                scaleCompensationHelpers.set(i, helper);
+                parentBone = helper;
+                localMatrix = split.boneLocalMatrix;
+            }
             const bone = new Bone(
                 bones[i].name,
                 skeleton,
@@ -1506,18 +1536,102 @@ export class FBXFileLoader implements ISceneLoaderPluginAsync {
             ) {
                 this._bindRestBones.add(bone);
             }
-            babylonBones.push(bone);
+            sourceBones.push(bone);
         }
+        this._sourceBonesBySkeleton.set(skeleton, sourceBones);
+        this._scaleCompensationHelpersBySkeleton.set(skeleton, scaleCompensationHelpers);
 
         if (!useBindAsRest) {
             for (let i = 0; i < bones.length; i++) {
-                const bone = babylonBones[i];
+                const bone = sourceBones[i];
                 bone.updateMatrix(localBindMatrices[i], false, false);
-                bone._updateAbsoluteBindMatrices(undefined, false);
+            }
+            for (const helper of scaleCompensationHelpers.values()) {
+                helper.updateMatrix(Matrix.Identity(), false, false);
+            }
+            for (const bone of skeleton.bones) {
+                if (!bone.getParent()) {
+                    bone._updateAbsoluteBindMatrices(undefined, true);
+                }
             }
         }
 
         return skeleton;
+    }
+
+    private _getSourceBone(skeleton: Skeleton, sourceIndex: number): Bone | undefined {
+        return this._sourceBonesBySkeleton.get(skeleton)?.[sourceIndex] ?? skeleton.bones[sourceIndex];
+    }
+
+    private _getScaleCompensationHelper(skeleton: Skeleton, sourceIndex: number): Bone | undefined {
+        return this._scaleCompensationHelpersBySkeleton.get(skeleton)?.get(sourceIndex);
+    }
+
+    private static _computeFBXAbsoluteMatrices(
+        bones: FBXBoneData[],
+        localMatrices: Matrix[]
+    ): Matrix[] {
+        const absoluteMatrices: Matrix[] = [];
+        for (let i = 0; i < bones.length; i++) {
+            const parentIndex = bones[i].parentIndex;
+            if (parentIndex < 0) {
+                absoluteMatrices[i] = localMatrices[i].clone();
+                continue;
+            }
+
+            absoluteMatrices[i] = localMatrices[i].multiply(absoluteMatrices[parentIndex]);
+        }
+        return absoluteMatrices;
+    }
+
+    private static _computeFBXRuntimeLocalMatrix(
+        bones: FBXBoneData[],
+        localMatrix: Matrix,
+        index: number,
+        parentScaleOverride?: [number, number, number]
+    ): Matrix {
+        const parentIndex = bones[index].parentIndex;
+        if (bones[index].inheritType !== 2 || parentIndex < 0) {
+            return localMatrix;
+        }
+
+        const parentScale = parentScaleOverride ?? bones[parentIndex].scale;
+        return FBXFileLoader._applyParentScaleCompensation(localMatrix, parentScale);
+    }
+
+    private static _applyParentScaleCompensation(
+        localMatrix: Matrix,
+        parentScale: [number, number, number]
+    ): Matrix {
+        const split = FBXFileLoader._splitParentScaleCompensatedLocalMatrix(localMatrix, parentScale);
+        return split.boneLocalMatrix.multiply(split.helperLocalMatrix);
+    }
+
+    private static _splitParentScaleCompensatedLocalMatrix(
+        localMatrix: Matrix,
+        parentScale: [number, number, number]
+    ): { boneLocalMatrix: Matrix; helperLocalMatrix: Matrix } {
+        const translation = localMatrix.getTranslation();
+        const boneLocalMatrix = localMatrix.clone();
+        boneLocalMatrix.setTranslation(Vector3.Zero());
+        const helperLocalMatrix = Matrix.Compose(
+            FBXFileLoader._getInverseScaleVector(parentScale),
+            Quaternion.Identity(),
+            translation
+        );
+        return { boneLocalMatrix, helperLocalMatrix };
+    }
+
+    private static _safeInverseScale(value: number): number {
+        return Math.abs(value) > 1e-8 ? 1 / value : 1;
+    }
+
+    private static _getInverseScaleVector(scale: [number, number, number]): Vector3 {
+        return new Vector3(
+            FBXFileLoader._safeInverseScale(scale[0]),
+            FBXFileLoader._safeInverseScale(scale[1]),
+            FBXFileLoader._safeInverseScale(scale[2])
+        );
     }
 
     private static _shouldUseBindMatricesAsRest(
@@ -1712,7 +1826,7 @@ export class FBXFileLoader implements ISceneLoaderPluginAsync {
             if (!skeleton) continue;
 
             for (const boneData of rig.bones) {
-                const bone = skeleton.bones[boneData.index];
+                const bone = this._getSourceBone(skeleton, boneData.index);
                 if (!bone) continue;
 
                 const bones = modelIdToBones.get(boneData.modelId);
@@ -1751,7 +1865,41 @@ export class FBXFileLoader implements ISceneLoaderPluginAsync {
         // Process bone targets: compute full FBX local matrix per frame, decompose to TRS.
         // For bind-rest rigs, only the bones recorded in _bindRestBones need their
         // authored Lcl curves remapped onto the bind-rest local space.
+        const inheritedRigModelIds = new Set<bigint>();
+        for (const rig of rigs) {
+            const inheritType2ModelIds = new Set(rig.bones
+                .filter((bone) => bone.inheritType === 2)
+                .map((bone) => bone.modelId));
+            if (inheritType2ModelIds.size === 0) continue;
+
+            const skeleton = skeletonByRigId.get(rig.id);
+            if (!skeleton) continue;
+
+            if (skeleton.bones.some((bone) => this._bindRestBones.has(bone))) {
+                continue;
+            }
+
+            for (const modelId of inheritType2ModelIds) {
+                inheritedRigModelIds.add(modelId);
+            }
+            for (const { bone, animations } of this._buildInheritedRigBoneAnimations(
+                rig,
+                skeleton,
+                boneCurves,
+                modelIdToData,
+                inheritType2ModelIds,
+                animStack.startTime,
+                animStack.stopTime
+            )) {
+                for (const animation of animations) {
+                    animGroup.addTargetedAnimation(animation, bone);
+                }
+            }
+        }
+
         for (const [targetId, curveNodes] of boneCurves) {
+            if (inheritedRigModelIds.has(targetId)) continue;
+
             const bones = modelIdToBones.get(targetId);
             const modelData = modelIdToData.get(targetId);
             if (!bones || bones.length === 0 || !modelData) continue;
@@ -1863,6 +2011,191 @@ export class FBXFileLoader implements ISceneLoaderPluginAsync {
 
         animGroup.dispose();
         return null;
+    }
+
+    private _buildInheritedRigBoneAnimations(
+        rig: FBXRigData,
+        skeleton: Skeleton,
+        boneCurves: Map<bigint, FBXCurveNodeData[]>,
+        modelIdToData: Map<bigint, FBXModelData>,
+        compensatedModelIds: Set<bigint>,
+        startTime: number,
+        stopTime: number
+    ): { bone: Bone; animations: Animation[] }[] {
+        const fps = 30;
+        const sampledModelIds = new Set<bigint>();
+        for (let i = 0; i < rig.bones.length; i++) {
+            if (!compensatedModelIds.has(rig.bones[i].modelId)) continue;
+
+            for (let parentIndex = i; parentIndex >= 0; parentIndex = rig.bones[parentIndex].parentIndex) {
+                sampledModelIds.add(rig.bones[parentIndex].modelId);
+            }
+        }
+        const rigCurveNodes = rig.bones
+            .filter((bone) => sampledModelIds.has(bone.modelId))
+            .flatMap((bone) => boneCurves.get(bone.modelId) ?? []);
+        const times = collectAnimationSampleTimes(rigCurveNodes, fps, startTime, stopTime);
+        if (times.length === 0) return [];
+
+        const keysByBone = rig.bones.map(() => ({
+            posKeys: [] as { frame: number; value: Vector3 }[],
+            rotKeys: [] as { frame: number; value: Quaternion }[],
+            sclKeys: [] as { frame: number; value: Vector3 }[],
+            prevQuat: null as Quaternion | null,
+        }));
+        const keysByHelper = rig.bones.map(() => ({
+            posKeys: [] as { frame: number; value: Vector3 }[],
+            rotKeys: [] as { frame: number; value: Quaternion }[],
+            sclKeys: [] as { frame: number; value: Vector3 }[],
+            prevQuat: null as Quaternion | null,
+        }));
+        const restLocalInverses = rig.bones.map((boneData, index) => {
+            const bone = this._getSourceBone(skeleton, index);
+            const modelData = modelIdToData.get(boneData.modelId);
+            if (!bone || !modelData || !this._bindRestBones.has(bone)) return null;
+
+            const restLocalMatrix = FBXFileLoader._computeFBXModelLocalMatrix(modelData);
+            const restLocalInverse = new Matrix();
+            restLocalMatrix.invertToRef(restLocalInverse);
+            return restLocalInverse;
+        });
+
+        for (const time of times) {
+            const localMatrices = rig.bones.map((boneData, index) => {
+                const modelData = modelIdToData.get(boneData.modelId);
+                const curveNodes = boneCurves.get(boneData.modelId) ?? [];
+                let localMatrix = modelData
+                    ? this._sampleModelLocalMatrix(modelData, curveNodes, time)
+                    : Matrix.Identity();
+
+                const restLocalInverse = restLocalInverses[index];
+                if (restLocalInverse) {
+                    const sourceBone = this._getSourceBone(skeleton, index);
+                    localMatrix = (sourceBone?.getBindMatrix() ?? Matrix.Identity()).multiply(restLocalInverse).multiply(localMatrix);
+                }
+                return localMatrix;
+            });
+            const sampledScales = rig.bones.map((boneData) => {
+                const modelData = modelIdToData.get(boneData.modelId);
+                const curveNodes = boneCurves.get(boneData.modelId) ?? [];
+                return modelData
+                    ? this._sampleModelScale(modelData, curveNodes, time)
+                    : boneData.scale;
+            });
+            const frame = time * fps;
+
+            for (let i = 0; i < localMatrices.length; i++) {
+                if (!compensatedModelIds.has(rig.bones[i].modelId)) continue;
+
+                const parentIndex = rig.bones[i].parentIndex;
+                const parentScale = parentIndex >= 0 ? sampledScales[parentIndex] : rig.bones[i].scale;
+                const split = FBXFileLoader._splitParentScaleCompensatedLocalMatrix(localMatrices[i], parentScale);
+                FBXFileLoader._pushMatrixKeys(keysByBone[i], frame, split.boneLocalMatrix);
+                FBXFileLoader._pushMatrixKeys(keysByHelper[i], frame, split.helperLocalMatrix);
+            }
+        }
+
+        const result: { bone: Bone; animations: Animation[] }[] = [];
+        for (let i = 0; i < rig.bones.length; i++) {
+            if (!compensatedModelIds.has(rig.bones[i].modelId)) continue;
+
+            const bone = this._getSourceBone(skeleton, i);
+            if (!bone) continue;
+
+            const { posKeys, rotKeys, sclKeys } = keysByBone[i];
+            const animations: Animation[] = [];
+            if (!this._isVector3KeysConstant(posKeys)) {
+                const posAnim = new Animation(
+                    `${bone.name}_position`, "position", fps,
+                    Animation.ANIMATIONTYPE_VECTOR3, Animation.ANIMATIONLOOPMODE_CYCLE
+                );
+                posAnim.setKeys(posKeys);
+                animations.push(posAnim);
+            }
+            if (!areQuaternionKeysConstant(rotKeys)) {
+                const rotAnim = new Animation(
+                    `${bone.name}_rotation`, "rotationQuaternion", fps,
+                    Animation.ANIMATIONTYPE_QUATERNION, Animation.ANIMATIONLOOPMODE_CYCLE
+                );
+                rotAnim.setKeys(rotKeys);
+                animations.push(rotAnim);
+            }
+            if (!this._isVector3KeysConstant(sclKeys)) {
+                const sclAnim = new Animation(
+                    `${bone.name}_scaling`, "scaling", fps,
+                    Animation.ANIMATIONTYPE_VECTOR3, Animation.ANIMATIONLOOPMODE_CYCLE
+                );
+                sclAnim.setKeys(sclKeys);
+                animations.push(sclAnim);
+            }
+            if (animations.length > 0) {
+                result.push({ bone, animations });
+            }
+
+            const helper = this._getScaleCompensationHelper(skeleton, i);
+            if (!helper) continue;
+
+            const helperAnimations: Animation[] = [];
+            const {
+                posKeys: helperPosKeys,
+                rotKeys: helperRotKeys,
+                sclKeys: helperSclKeys,
+            } = keysByHelper[i];
+            if (!this._isVector3KeysConstant(helperPosKeys)) {
+                const posAnim = new Animation(
+                    `${helper.name}_position`, "position", fps,
+                    Animation.ANIMATIONTYPE_VECTOR3, Animation.ANIMATIONLOOPMODE_CYCLE
+                );
+                posAnim.setKeys(helperPosKeys);
+                helperAnimations.push(posAnim);
+            }
+            if (!areQuaternionKeysConstant(helperRotKeys)) {
+                const rotAnim = new Animation(
+                    `${helper.name}_rotation`, "rotationQuaternion", fps,
+                    Animation.ANIMATIONTYPE_QUATERNION, Animation.ANIMATIONLOOPMODE_CYCLE
+                );
+                rotAnim.setKeys(helperRotKeys);
+                helperAnimations.push(rotAnim);
+            }
+            if (!this._isVector3KeysConstant(helperSclKeys)) {
+                const sclAnim = new Animation(
+                    `${helper.name}_scaling`, "scaling", fps,
+                    Animation.ANIMATIONTYPE_VECTOR3, Animation.ANIMATIONLOOPMODE_CYCLE
+                );
+                sclAnim.setKeys(helperSclKeys);
+                helperAnimations.push(sclAnim);
+            }
+            if (helperAnimations.length > 0) {
+                result.push({ bone: helper, animations: helperAnimations });
+            }
+        }
+
+        return result;
+    }
+
+    private static _pushMatrixKeys(
+        keySet: {
+            posKeys: { frame: number; value: Vector3 }[];
+            rotKeys: { frame: number; value: Quaternion }[];
+            sclKeys: { frame: number; value: Vector3 }[];
+            prevQuat: Quaternion | null;
+        },
+        frame: number,
+        matrix: Matrix
+    ): void {
+        const s = new Vector3();
+        const r = new Quaternion();
+        const t = new Vector3();
+        matrix.decompose(s, r, t);
+
+        if (keySet.prevQuat && Quaternion.Dot(keySet.prevQuat, r) < 0) {
+            r.scaleInPlace(-1);
+        }
+        keySet.prevQuat = r;
+
+        keySet.posKeys.push({ frame, value: t });
+        keySet.rotKeys.push({ frame, value: r });
+        keySet.sclKeys.push({ frame, value: s });
     }
 
     /**
@@ -2000,7 +2333,8 @@ export class FBXFileLoader implements ISceneLoaderPluginAsync {
     private _sampleModelLocalMatrix(
         modelData: FBXModelData,
         curveNodes: FBXCurveNodeData[],
-        time: number
+        time: number,
+        scaleOverride?: [number, number, number]
     ): Matrix {
         const tNode = curveNodes.find(cn => cn.type === "T");
         const rNode = curveNodes.find(cn => cn.type === "R");
@@ -2027,7 +2361,7 @@ export class FBXFileLoader implements ISceneLoaderPluginAsync {
                 sampleFBXCurveAtTime(ryCurve, time) ?? modelData.rotation[1],
                 sampleFBXCurveAtTime(rzCurve, time) ?? modelData.rotation[2],
             ],
-            [
+            scaleOverride ?? [
                 sampleFBXCurveAtTime(sxCurve, time) ?? modelData.scale[0],
                 sampleFBXCurveAtTime(syCurve, time) ?? modelData.scale[1],
                 sampleFBXCurveAtTime(szCurve, time) ?? modelData.scale[2],
@@ -2040,6 +2374,22 @@ export class FBXFileLoader implements ISceneLoaderPluginAsync {
             modelData.scalingOffset,
             modelData.rotationOrder
         );
+    }
+
+    private _sampleModelScale(
+        modelData: FBXModelData,
+        curveNodes: FBXCurveNodeData[],
+        time: number
+    ): [number, number, number] {
+        const sNode = curveNodes.find(cn => cn.type === "S");
+        const sxCurve = sNode?.curves.find(c => c.channel === "d|X");
+        const syCurve = sNode?.curves.find(c => c.channel === "d|Y");
+        const szCurve = sNode?.curves.find(c => c.channel === "d|Z");
+        return [
+            sampleFBXCurveAtTime(sxCurve, time) ?? modelData.scale[0],
+            sampleFBXCurveAtTime(syCurve, time) ?? modelData.scale[1],
+            sampleFBXCurveAtTime(szCurve, time) ?? modelData.scale[2],
+        ];
     }
 
     /**
@@ -2810,6 +3160,21 @@ function collectAnimationSampleTimes(
     }
 
     return [...times].sort((a, b) => a - b);
+}
+
+function areQuaternionKeysConstant(keys: { frame: number; value: Quaternion }[]): boolean {
+    if (keys.length < 2) return true;
+    const first = keys[0].value;
+    for (let i = 1; i < keys.length; i++) {
+        const value = keys[i].value;
+        if (Math.abs(value.x - first.x) > 0.0001 ||
+            Math.abs(value.y - first.y) > 0.0001 ||
+            Math.abs(value.z - first.z) > 0.0001 ||
+            Math.abs(value.w - first.w) > 0.0001) {
+            return false;
+        }
+    }
+    return true;
 }
 
 function buildScalarAnimationKeys(

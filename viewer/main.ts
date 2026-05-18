@@ -64,6 +64,7 @@ interface ViewerPBRMaterialOverride {
     transparencyMode?: "opaque" | "alphaTest" | "alphaBlend";
     metallic?: number;
     roughness?: number;
+    unlit?: boolean;
     alpha?: number;
     alphaCutOff?: number;
     clearOpacityTexture?: boolean;
@@ -80,7 +81,7 @@ interface ViewerPBRMaterialOverride {
 }
 
 interface ViewerPackedORMTextureOverride {
-    occlusionPath: string;
+    occlusionPath?: string;
     roughnessPath: string;
     metallicPath: string;
     name?: string;
@@ -148,6 +149,8 @@ interface ViewerModelOverride {
     disableVertexColors?: boolean;
     forceOpaque?: boolean;
     viewerRotationYDegrees?: number;
+    viewerCameraRadiusMultiplier?: number;
+    viewerCameraTargetOffset?: [number, number, number];
 }
 
 interface ModelEntry {
@@ -171,6 +174,10 @@ interface ModelEntry {
     forceOpaque?: boolean;
     /** Viewer-only root yaw adjustment, in degrees. */
     viewerRotationYDegrees?: number;
+    /** Viewer-only camera radius adjustment for assets whose static bounds do not match their visible posed size. */
+    viewerCameraRadiusMultiplier?: number;
+    /** Viewer-only camera target offset after normalization, in normalized viewer units. */
+    viewerCameraTargetOffset?: [number, number, number];
 }
 
 const DEFAULT_MODEL_PATH = "spider-animated-character/Spider_sketchfab.fbx";
@@ -224,6 +231,63 @@ const modelOverrides: Record<string, ViewerModelOverride> = {
         ],
         viewerRotationYDegrees: -30,
     },
+    "cloud-station/model.fbx": {
+        name: "Cloud Station",
+        pbrMaterialOverrides: [
+            { materialName: "sky_MAT_PBR", backFaceCulling: true },
+            { materialName: "EVSB_FISH:fish_MAT", unlit: true },
+            { materialName: "EVSB_FISH1:fish_MAT", unlit: true },
+            { materialName: "EVSB_FISH2:fish_MAT", unlit: true },
+        ],
+    },
+    "etrian-odyssey-3-monk/EOMonk.fbx": {
+        name: "Etrian Odyssey 3 Monk",
+        textures: [
+            { slot: "diffuse", path: "etrian-odyssey-3-monk/Head.png", materialName: "Head" },
+            { slot: "diffuse", path: "etrian-odyssey-3-monk/Body.png", materialName: "Body" },
+            { slot: "diffuse", path: "etrian-odyssey-3-monk/Clothes.png", materialName: "Clothes" },
+            { slot: "diffuse", path: "etrian-odyssey-3-monk/Hair.png", materialName: "Hair" },
+            { slot: "diffuse", path: "etrian-odyssey-3-monk/Eye.png", materialName: "Eye" },
+            { slot: "diffuse", path: "etrian-odyssey-3-monk/Eye.png", materialName: "Eye_VertexColor" },
+        ],
+        pbrMaterialOverrides: [
+            { materialName: "OH_Outline_Material", albedoColor: [0, 0, 0], backFaceCulling: true },
+        ],
+    },
+    "kgirls01/kgirls01.fbx": {
+        name: "Kgirls01",
+        viewerCameraRadiusMultiplier: 0.55,
+        viewerCameraTargetOffset: [0, -3.5, 0],
+    },
+    "kuma-heavy-robot-r-9000s/Roboarm_lowpoly.fbx": {
+        name: "Kuma Heavy Robot R-9000S",
+        disableVertexColors: true,
+        pbrMaterialTextureAliases: [
+            { materialName: "Material.001", textureMaterialKey: "Checker" },
+            { materialName: "Material.002", textureMaterialKey: "Checker" },
+        ],
+        pbrMaterialOverrides: [
+            {
+                materialName: "Material.001_VertexColor",
+                backFaceCulling: true,
+                packedOrmTexture: {
+                    occlusionPath: "kuma-heavy-robot-r-9000s/Checker_AO.jpg",
+                    roughnessPath: "kuma-heavy-robot-r-9000s/Checker_roughness.jpg",
+                    metallicPath: "kuma-heavy-robot-r-9000s/Checker_metallic.jpg",
+                    name: "Checker_ORM_Packed",
+                },
+            },
+            {
+                materialName: "Material.002_VertexColor",
+                packedOrmTexture: {
+                    occlusionPath: "kuma-heavy-robot-r-9000s/Checker_AO.jpg",
+                    roughnessPath: "kuma-heavy-robot-r-9000s/Checker_roughness.jpg",
+                    metallicPath: "kuma-heavy-robot-r-9000s/Checker_metallic.jpg",
+                    name: "Checker_ORM_Packed",
+                },
+            },
+        ],
+    },
     "tamagotchi-pet-sailor-moon/lp_01.fbx": {
         name: "Tamagotchi Pet Sailor Moon",
         viewerRotationYDegrees: 120,
@@ -267,6 +331,37 @@ const modelOverrides: Record<string, ViewerModelOverride> = {
             {
                 materialName: "ground",
                 transparencyMode: "alphaTest",
+            },
+        ],
+    },
+    "truffle-man/Shroom.fbx": {
+        name: "Truffle Man",
+        textures: [
+            { slot: "diffuse", path: "truffle-man/ShroomFinal_MatMushroomBody_BaseColor.png", materialName: "MatMushroomBody" },
+            { slot: "normal", path: "truffle-man/ShroomFinal_MatMushroomBody_Normal.png", materialName: "MatMushroomBody" },
+            { slot: "roughness", path: "truffle-man/ShroomFinal_MatMushroomBody_Roughness.png", materialName: "MatMushroomBody" },
+            { slot: "metallic", path: "truffle-man/ShroomFinal_MatMushroomBody_Metallic.png", materialName: "MatMushroomBody" },
+            { slot: "diffuse", path: "truffle-man/ShroomFinal_MatMushroom_BaseColor.png", materialName: "MatMushroom" },
+            { slot: "normal", path: "truffle-man/ShroomFinal_MatMushroom_Normal.png", materialName: "MatMushroom" },
+            { slot: "roughness", path: "truffle-man/ShroomFinal_MatMushroom_Roughness.png", materialName: "MatMushroom" },
+            { slot: "metallic", path: "truffle-man/ShroomFinal_MatMushroom_Metallic.png", materialName: "MatMushroom" },
+        ],
+        pbrMaterialOverrides: [
+            {
+                materialName: "MatMushroomBody",
+                packedOrmTexture: {
+                    roughnessPath: "truffle-man/ShroomFinal_MatMushroomBody_Roughness.png",
+                    metallicPath: "truffle-man/ShroomFinal_MatMushroomBody_Metallic.png",
+                    name: "ShroomFinal_MatMushroomBody_MetallicRoughness_Packed",
+                },
+            },
+            {
+                materialName: "MatMushroom",
+                packedOrmTexture: {
+                    roughnessPath: "truffle-man/ShroomFinal_MatMushroom_Roughness.png",
+                    metallicPath: "truffle-man/ShroomFinal_MatMushroom_Metallic.png",
+                    name: "ShroomFinal_MatMushroom_MetallicRoughness_Packed",
+                },
             },
         ],
     },
@@ -641,6 +736,8 @@ function buildModelCatalog(): ModelEntry[] {
                 disableVertexColors: override.disableVertexColors,
                 forceOpaque: override.forceOpaque,
                 viewerRotationYDegrees: override.viewerRotationYDegrees,
+                viewerCameraRadiusMultiplier: override.viewerCameraRadiusMultiplier,
+                viewerCameraTargetOffset: override.viewerCameraTargetOffset,
             };
         });
 }
@@ -1231,6 +1328,12 @@ function createViewerPBRMaterial(
         pbrMaterial.emissiveColor = sourceMaterial.emissiveColor.clone();
         pbrMaterial.alpha = sourceMaterial.alpha;
         pbrMaterial.backFaceCulling = sourceMaterial.backFaceCulling;
+        const specularEnergy = sourceMaterial.specularColor.r * sourceMaterial.specularColor.r +
+            sourceMaterial.specularColor.g * sourceMaterial.specularColor.g +
+            sourceMaterial.specularColor.b * sourceMaterial.specularColor.b;
+        if (specularEnergy < 1e-8 && !sourceMaterial.specularTexture) {
+            pbrMaterial.roughness = 1;
+        }
         textureCount += copyStandardMaterialTexturesToPBR(sourceMaterial, pbrMaterial, forceOpaque);
         if (!forceOpaque && standardMaterialHasAlpha(sourceMaterial)) {
             pbrMaterial.needDepthPrePass = true;
@@ -1681,7 +1784,9 @@ function materialName(material: unknown): string {
 function normalizeLoadedAsset(
     result: ISceneLoaderAsyncResult,
     manifest: ViewerPBRTextureManifest | null,
-    viewerRotationYDegrees = 0
+    viewerRotationYDegrees = 0,
+    viewerCameraRadiusMultiplier?: number,
+    viewerCameraTargetOffset?: [number, number, number]
 ): ViewerAssetFrame {
     const settings = manifest?.normalization ?? DEFAULT_NORMALIZATION;
     const originalExtents = getLoadedMeshExtents(result);
@@ -1726,11 +1831,14 @@ function normalizeLoadedAsset(
     const center = normalizedExtents
         ? normalizedExtents.min.add(normalizedExtents.max).scale(0.5)
         : Vector3.Zero();
+    if (viewerCameraTargetOffset) {
+        center.addInPlace(Vector3.FromArray(viewerCameraTargetOffset));
+    }
     const size = normalizedExtents
         ? normalizedExtents.max.subtract(normalizedExtents.min).length()
         : settings.targetDiagonal;
     const safeSize = Number.isFinite(size) && size > 0 ? size : settings.targetDiagonal;
-    const radius = safeSize * settings.cameraRadiusMultiplier;
+    const radius = safeSize * (viewerCameraRadiusMultiplier ?? settings.cameraRadiusMultiplier);
 
     return {
         center,
@@ -2610,7 +2718,13 @@ async function loadModel(index: number) {
             }
         }
 
-        const frame = normalizeLoadedAsset(currentResult, manifest, model.viewerRotationYDegrees);
+        const frame = normalizeLoadedAsset(
+            currentResult,
+            manifest,
+            model.viewerRotationYDegrees,
+            model.viewerCameraRadiusMultiplier,
+            model.viewerCameraTargetOffset
+        );
         camera.target = frame.center;
         camera.radius = frame.camera.radius;
         camera.minZ = frame.camera.minZ;
@@ -2828,6 +2942,10 @@ async function applyPBRMaterialOverrides(
                 mat.roughness = override.roughness;
             }
 
+            if (override.unlit !== undefined) {
+                mat.unlit = override.unlit;
+            }
+
             if (override.alpha !== undefined) {
                 mat.alpha = override.alpha;
             }
@@ -2952,7 +3070,7 @@ async function applyPackedORMTextureOverride(
 
 async function createPackedORMTexture(override: ViewerPackedORMTextureOverride): Promise<Texture> {
     const [occlusion, roughness, metallic] = await Promise.all([
-        loadImageData(override.occlusionPath),
+        override.occlusionPath ? loadImageData(override.occlusionPath) : Promise.resolve(null),
         loadImageData(override.roughnessPath),
         loadImageData(override.metallicPath),
     ]);
@@ -2969,7 +3087,7 @@ async function createPackedORMTexture(override: ViewerPackedORMTextureOverride):
     const output = ctx.createImageData(width, height);
     for (let i = 0; i < width * height; i++) {
         const outputOffset = i * 4;
-        output.data[outputOffset] = getImageRedChannel(occlusion, i, width, height, true);
+        output.data[outputOffset] = occlusion ? getImageRedChannel(occlusion, i, width, height, true) : 255;
         output.data[outputOffset + 1] = getImageRedChannel(roughness, i, width, height, true);
         output.data[outputOffset + 2] = getImageRedChannel(metallic, i, width, height, true);
         output.data[outputOffset + 3] = 255;
