@@ -6,6 +6,8 @@ Pure TypeScript FBX loader/importer plugin for [Babylon.js](https://www.babylonj
 
 This project is an active FBX loader implementation with fixture-driven coverage for binary FBX, ASCII FBX, static meshes, skinned meshes, blend shapes, animation curves, materials, textures, and diagnostics. It is intended for Babylon.js projects that need a TypeScript-native FBX import path.
 
+For the latest tangent-space, normal-map, roughness, and viewer diagnostics review, see [`FBX_LOADER_TANGENT_NORMAL_REVIEW.md`](./FBX_LOADER_TANGENT_NORMAL_REVIEW.md).
+
 ## Install
 
 ```bash
@@ -95,9 +97,11 @@ Key source areas:
 - Mesh geometry with triangulated polygons.
 - Polygon vertex indices using FBX negative-index-minus-one polygon termination.
 - Normals, UVs, vertex colors, tangents, binormals, and material indices.
+- Tangent generation for meshes with normals and UVs when FBX tangents are missing, including handedness handling for left-handed and right-handed scenes.
 - UV mapping modes including `ByPolygonVertex`, `ByControlPoint`, and `AllSame`.
 - Reference modes including `Direct` and `IndexToDirect`.
 - Standard Babylon materials with diffuse, ambient, specular, emissive, opacity, bump, and reflection texture slots.
+- Tangent-space normal map setup for FBX normal-map slots, with `Bump` and `BumpFactor` kept separate from normal-map data texture configuration.
 - Texture UV transforms and UV set selection.
 - External texture fallback by same basename across common image extensions.
 - Embedded texture payloads from FBX `Video` nodes.
@@ -106,7 +110,7 @@ Key source areas:
 - Model transforms with pivots, offsets, pre/post rotations, geometric transforms, and rotation order.
 - Custom FBX model properties in Babylon metadata.
 - Cameras and lights with fidelity metadata for unsupported or diagnostic-only properties.
-- Skinned meshes, bind poses, cluster weights, shared rig resolution, and more than four bone influences via Babylon extra skinning buffers.
+- Skinned meshes, bind poses, bind-rest correction for severe local/bind scale mismatches, cluster weights, shared rig resolution, and more than four bone influences via Babylon extra skinning buffers.
 - Blend shapes and in-between shape weights.
 - Animation stacks, layers, curve nodes, curve key metadata, and Babylon animation groups.
 - Scene/model/animation/skinning diagnostics for unsupported or runtime-gated FBX features.
@@ -142,6 +146,10 @@ http://localhost:5173/?model=behemot-cat/LowPoly_Cat_V04.fbx
 
 Viewer material overrides live in `viewer/main.ts`. These are viewer-only corrections for fixture inspection and reference matching, not loader runtime behavior. They cover cases where source FBX files omit texture connections, contain artist-authored texture naming mistakes, or need presentation-only flags such as culling, opacity clearing, or root rotation.
 
+The viewer status pane reports loaded mesh, skeleton, animation, texture, UV, geometry, material, skeleton, and FBX diagnostic summaries. It also calls out meshes with normals, meshes with tangents, materials/meshes using normal textures, and FBX source geometry counts for normals, tangents, and binormals. Viewer-only ORM packing for comparison fixtures decodes AO, roughness, and metallic source textures as data textures to avoid browser color-space conversion changing roughness values.
+
+The Holotech Bench FBX/GLB comparison fixture is included under `tests/models/holotech-bench/` and is useful for checking tangent-space reflections, normal texture setup, and ORM roughness parity.
+
 ## Tests and fixtures
 
 The test suite uses Vitest and fixture assets in `tests/models/`.
@@ -164,3 +172,4 @@ Coverage includes:
 - Add fixture regression coverage when changing parser or interpreter behavior.
 - Use viewer overrides only for local visual/debug presentation issues; avoid encoding viewer-only asset fixes into the loader.
 - Preserve diagnostics for unsupported FBX features instead of silently dropping them.
+- Before pushing repo changes, review and update this README when behavior, fixtures, diagnostics, commands, or workflow details have changed.
