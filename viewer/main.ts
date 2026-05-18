@@ -15,6 +15,7 @@ import { TransformNode } from "@babylonjs/core/Meshes/transformNode.js";
 import "@babylonjs/core/Materials/Textures/Loaders/envTextureLoader.js";
 import type { ISceneLoaderAsyncResult } from "@babylonjs/core/Loading/sceneLoader.js";
 import type { BaseTexture } from "@babylonjs/core/Materials/Textures/baseTexture.js";
+import type { Bone } from "@babylonjs/core/Bones/bone.js";
 
 // PBR material support (required for GLB/glTF models)
 import "@babylonjs/core/Materials/PBR/pbrMaterial.js";
@@ -27,6 +28,10 @@ import "@babylonjs/core/Shaders/postprocess.vertex.js";
 import "@babylonjs/loaders/glTF/2.0/index.js";
 
 import { FBXFileLoader } from "../src/fbxFileLoader.js";
+import { parseAsciiFBX } from "../src/parsers/fbxAsciiParser.js";
+import { parseBinaryFBX } from "../src/parsers/fbxBinaryParser.js";
+import { interpretFBX, type FBXSceneData } from "../src/interpreter/fbxInterpreter.js";
+import type { FBXDocument } from "../src/types/fbxTypes.js";
 import studioEnvironmentUrl from "./studio.env?url";
 
 // Import test assets via Vite's ?url transform (works for assets outside root).
@@ -34,6 +39,9 @@ const assetUrls = import.meta.glob<string>(
     "../tests/models/**/*.{fbx,FBX,glb,GLB,png,PNG,jpg,JPG,jpeg,JPEG,webp,WEBP}",
     { eager: true, query: "?url", import: "default" }
 );
+
+const FBX_BINARY_MAGIC = "Kaydara FBX Binary";
+const FBX_ASCII_MAGIC = "; FBX";
 
 function assetUrl(relativePath: string): string {
     const url = assetUrls[`../tests/models/${relativePath}`];
@@ -48,6 +56,8 @@ SceneLoader.RegisterPlugin(new FBXFileLoader());
 
 interface ViewerPBRMaterialOverride {
     materialName: string;
+    albedoColor?: [number, number, number];
+    emissiveColor?: [number, number, number];
     albedoTextureHasAlpha?: boolean;
     useAlphaFromAlbedoTexture?: boolean;
     useAdditiveAlpha?: boolean;
@@ -57,12 +67,23 @@ interface ViewerPBRMaterialOverride {
     alpha?: number;
     alphaCutOff?: number;
     clearOpacityTexture?: boolean;
+    clearBumpTexture?: boolean;
+    clearEmissiveTexture?: boolean;
+    needDepthPrePass?: boolean;
     backFaceCulling?: boolean;
     forceIrradianceInFragment?: boolean;
     invertNormalMapX?: boolean;
     invertNormalMapY?: boolean;
+    packedOrmTexture?: ViewerPackedORMTextureOverride;
     clearCoat?: ViewerPBRClearCoatOverride;
     subSurface?: ViewerPBRSubSurfaceOverride;
+}
+
+interface ViewerPackedORMTextureOverride {
+    occlusionPath: string;
+    roughnessPath: string;
+    metallicPath: string;
+    name?: string;
 }
 
 interface ViewerPBRClearCoatOverride {
@@ -157,7 +178,7 @@ const MODEL_QUERY_PARAM = "model";
 
 const modelOverrides: Record<string, ViewerModelOverride> = {
     "spider-animated-character/Spider_sketchfab.fbx": {
-        name: "Spider (FBX, animated)",
+        name: "Spider (animated)",
         defaultAnimation: "Spider_Walk",
         textures: [
             { slot: "diffuse", path: "spider-animated-character/Spider.png", materialName: "Spider_M" },
@@ -165,23 +186,23 @@ const modelOverrides: Record<string, ViewerModelOverride> = {
         ],
     },
     "spider-animated-character/spider_animated_character.glb": {
-        name: "Spider (GLB reference)",
+        name: "Spider",
         defaultAnimation: "Spider_Walk",
     },
     "anime-chibi-girl-aisha-by-seraphim/test2.fbx": {
-        name: "Aisha (FBX, animated)",
+        name: "Aisha (animated)",
         defaultAnimation: "Take 001",
     },
     "anime-chibi-girl-aisha-by-seraphim/anime_chibi_girl__aisha_by_seraphim.glb": {
-        name: "Aisha (GLB reference)",
+        name: "Aisha",
         defaultAnimation: "Take 001",
     },
     "bristleback-dota-fan-art/POSE.fbx": {
-        name: "Bristleback (FBX, animated)",
+        name: "Bristleback (animated)",
         defaultAnimation: "animtion_bristleback_base",
     },
     "bristleback-dota-fan-art/bristleback_dota_fan-art.glb": {
-        name: "Bristleback (GLB reference)",
+        name: "Bristleback",
         defaultAnimation: "animtion_bristleback_base",
     },
     "valkyrie/valkyrie_asset.fbx": {
@@ -208,7 +229,7 @@ const modelOverrides: Record<string, ViewerModelOverride> = {
         viewerRotationYDegrees: 120,
     },
     "phoenix-bird/fly.fbx": {
-        name: "Phoenix Bird (FBX, animated)",
+        name: "Phoenix Bird (animated)",
         forceOpaque: true,
         defaultAnimation: "Take 001",
         textures: [
@@ -217,7 +238,7 @@ const modelOverrides: Record<string, ViewerModelOverride> = {
         ],
     },
     "phoenix-bird/phoenix_bird.glb": {
-        name: "Phoenix Bird (GLB reference)",
+        name: "Phoenix Bird",
         defaultAnimation: "Take 001",
     },
     "stylized-ww1-plane/PlaneAnimated with toon.fbx": {
@@ -427,7 +448,7 @@ const modelOverrides: Record<string, ViewerModelOverride> = {
         ],
     },
     "vino/vino.glb": {
-        name: "Vino (GLB reference)",
+        name: "Vino",
     },
     "40min-draft-jet-car-vertex-color/Car.fbx": {
         name: "Jet Car (vertex colors)",
@@ -516,7 +537,7 @@ const modelOverrides: Record<string, ViewerModelOverride> = {
         ],
     },
     "spartan-armour-mkv-halo-reach/Spartan_Sketchfab.fbx": {
-        name: "Spartan Armor (FBX)",
+        name: "Spartan Armor",
         pbrMaterialTextureAliases: [
             { materialName: "Spartan_Shoulders_Mat", textureMaterialKey: "odst_shoulder_mat" },
             { materialName: "Spartan_Ear_Mat", textureMaterialKey: "spartan_ears_mat" },
@@ -524,21 +545,90 @@ const modelOverrides: Record<string, ViewerModelOverride> = {
         ],
     },
     "spartan-armour-mkv-halo-reach/spartan_armour_mkv_-_halo_reach.glb": {
-        name: "Spartan Armor (GLB reference)",
+        name: "Spartan Armor",
+    },
+    "holotech-bench/TechTable_Animation.fbx": {
+        name: "Holotech Bench",
+        textures: [
+            { slot: "albedo", path: "holotech-bench/MAT_Hologram_Planet_Normal_DirectX.png", materialName: "MAT_Hologram_Planet" },
+            { slot: "albedo", path: "holotech-bench/MAT_Hologram_Decals_Emissive.png", materialName: "MAT_Hologram_Decals" },
+        ],
+        pbrMaterialTextureAliases: [
+            { materialName: "MAT_TechTable_Body", textureMaterialKey: "mat_techtable_body" },
+            { materialName: "MAT_TechTable_Detail", textureMaterialKey: "mat_techtable_detail" },
+        ],
+        pbrMaterialOverrides: [
+            {
+                materialName: "MAT_Hologram_Planet",
+                alpha: 0.6385289634,
+                metallic: 0,
+                albedoColor: [1, 1, 1],
+                emissiveColor: [0.015351600983866513, 0.09572121951807, 0.9012355097543353],
+                transparencyMode: "alphaBlend",
+                needDepthPrePass: false,
+                backFaceCulling: false,
+                clearBumpTexture: true,
+            },
+            {
+                materialName: "MAT_Hologram_Decals",
+                metallic: 0,
+                roughness: 0.6263338414999999,
+                albedoColor: [0.5322027439, 0.5322027439, 0.5322027439],
+                emissiveColor: [0.47653553600000004, 0.656568391, 1],
+                albedoTextureHasAlpha: true,
+                useAlphaFromAlbedoTexture: true,
+                transparencyMode: "alphaBlend",
+                needDepthPrePass: false,
+                clearEmissiveTexture: true,
+                backFaceCulling: false,
+            },
+            {
+                materialName: "MAT_TechTable_Body",
+                emissiveColor: [1, 1, 1],
+                backFaceCulling: false,
+                invertNormalMapX: true,
+                invertNormalMapY: false,
+                packedOrmTexture: {
+                    occlusionPath: "holotech-bench/MAT_TechTable_Body_Mixed_AO.png",
+                    roughnessPath: "holotech-bench/MAT_TechTable_Body_Roughness.png",
+                    metallicPath: "holotech-bench/MAT_TechTable_Body_Metallic.png",
+                    name: "MAT_TechTable_Body_MetallicRoughness_Packed",
+                },
+            },
+            {
+                materialName: "MAT_TechTable_Detail",
+                emissiveColor: [1, 1, 1],
+                invertNormalMapX: true,
+                invertNormalMapY: false,
+                packedOrmTexture: {
+                    occlusionPath: "holotech-bench/MAT_TechTable_Detail_Mixed_AO.png",
+                    roughnessPath: "holotech-bench/MAT_TechTable_Detail_Roughness.png",
+                    metallicPath: "holotech-bench/MAT_TechTable_Detail_Metallic.png",
+                    name: "MAT_TechTable_Detail_MetallicRoughness_Packed",
+                },
+            },
+        ],
+    },
+    "holotech-bench/holotech_bench.glb": {
+        name: "Holotech Bench",
     },
 };
 
 const models: ModelEntry[] = buildModelCatalog();
 
 function buildModelCatalog(): ModelEntry[] {
-    return Object.keys(assetUrls)
+    const modelPaths = Object.keys(assetUrls)
         .map((path) => path.replace("../tests/models/", ""))
         .filter(isModelPath)
-        .sort((a, b) => modelDisplayName(a).localeCompare(modelDisplayName(b)))
+        .sort((a, b) => modelDisplayName(a).localeCompare(modelDisplayName(b)));
+    const pairedFormatDirectories = getPairedFormatDirectories(modelPaths);
+
+    return modelPaths
         .map((path) => {
             const override = modelOverrides[path] ?? {};
+            const hasFormatPair = pairedFormatDirectories.has(getDirectoryName(path));
             return {
-                name: override.name ?? modelDisplayName(path),
+                name: modelEntryDisplayName(path, override.name, hasFormatPair),
                 path,
                 url: assetUrl(path),
                 format: inferModelFormat(path),
@@ -553,6 +643,42 @@ function buildModelCatalog(): ModelEntry[] {
                 viewerRotationYDegrees: override.viewerRotationYDegrees,
             };
         });
+}
+
+function getPairedFormatDirectories(modelPaths: string[]): Set<string> {
+    const formatsByDirectory = new Map<string, Set<ModelEntry["format"]>>();
+    for (const path of modelPaths) {
+        const directory = getDirectoryName(path);
+        const formats = formatsByDirectory.get(directory) ?? new Set<ModelEntry["format"]>();
+        formats.add(inferModelFormat(path));
+        formatsByDirectory.set(directory, formats);
+    }
+
+    return new Set(
+        [...formatsByDirectory.entries()]
+            .filter(([, formats]) => formats.size > 1)
+            .map(([directory]) => directory)
+    );
+}
+
+function modelEntryDisplayName(path: string, overrideName: string | undefined, hasFormatPair: boolean): string {
+    const baseName = stripManualFormatSuffix(overrideName ?? modelDisplayName(path));
+    if (!hasFormatPair) return baseName;
+
+    const format = inferModelFormat(path).toUpperCase();
+    const parentheticalMatch = baseName.match(/^(.*)\(([^()]*)\)\s*$/);
+    if (parentheticalMatch) {
+        return `${parentheticalMatch[1].trimEnd()} (${parentheticalMatch[2]}, ${format})`;
+    }
+    return `${baseName} (${format})`;
+}
+
+function stripManualFormatSuffix(name: string): string {
+    return name
+        .replace(/\s*\((FBX|GLB)\s+reference\)$/i, "")
+        .replace(/\s*\((FBX|GLB),\s*animated\)$/i, " (animated)")
+        .replace(/\s*\((animated),\s*(FBX|GLB)\)$/i, " (animated)")
+        .replace(/\s*\((FBX|GLB)\)$/i, "");
 }
 
 function resolveTextureOverrides(textures: ViewerTextureOverrideSource[] = []): ViewerTextureOverride[] {
@@ -802,6 +928,35 @@ let engine: Engine;
 let scene: Scene;
 let camera: ArcRotateCamera;
 let currentResult: ISceneLoaderAsyncResult | null = null;
+
+function setStatusMessage(message: string): void {
+    status.textContent = message;
+}
+
+function setStatusDetails(summary: string, rows: ViewerStatusRow[]): void {
+    status.replaceChildren();
+
+    const summaryElement = document.createElement("div");
+    summaryElement.className = "status-summary";
+    summaryElement.textContent = summary;
+    status.appendChild(summaryElement);
+
+    for (const row of rows) {
+        const rowElement = document.createElement("div");
+        rowElement.className = row.alert ? "status-row status-alert" : "status-row";
+
+        const labelElement = document.createElement("span");
+        labelElement.className = "status-label";
+        labelElement.textContent = `${row.label}:`;
+
+        const valueElement = document.createElement("span");
+        valueElement.className = "status-value";
+        valueElement.textContent = row.value;
+
+        rowElement.append(labelElement, valueElement);
+        status.appendChild(rowElement);
+    }
+}
 
 async function main() {
     const canvas = document.getElementById("renderCanvas") as HTMLCanvasElement;
@@ -1067,6 +1222,8 @@ function createViewerPBRMaterial(
     const pbrMaterial = new PBRMaterial(`${materialName(sourceMaterial) || "material"}_PBR`, scene);
     pbrMaterial.metallic = 0;
     pbrMaterial.roughness = 0.6;
+    pbrMaterial.invertNormalMapX = !scene.useRightHandedSystem;
+    pbrMaterial.invertNormalMapY = scene.useRightHandedSystem;
     let textureCount = 0;
 
     if (sourceMaterial instanceof StandardMaterial) {
@@ -1200,6 +1357,8 @@ function copyStandardMaterialTexturesToPBR(
 
     if (sourceMaterial.bumpTexture) {
         pbrMaterial.bumpTexture = sourceMaterial.bumpTexture;
+        pbrMaterial.invertNormalMapX = sourceMaterial.invertNormalMapX;
+        pbrMaterial.invertNormalMapY = sourceMaterial.invertNormalMapY;
         textureCount++;
     }
 
@@ -1673,12 +1832,89 @@ function isAttachedToBone(node: unknown): boolean {
 }
 
 interface ViewerFeatureStats {
-    uvSetCount: number;
+    uvSets: ViewerUVSetStats[];
+    normalMeshCount: number;
+    tangentMeshCount: number;
+    normalTextureMaterialCount: number;
+    normalTextureMeshCount: number;
     hasVertexColors: boolean;
     morphTargetCount: number;
     multiMaterialCount: number;
     alphaMaterialCount: number;
+    skinnedMeshCount: number;
+    skeletonCount: number;
+    skeletonBoneCount: number;
+    skeletonRootCount: number;
+    skeletonMaxDepth: number;
+    boneAttachmentCount: number;
 }
+
+interface ViewerUVSetStats {
+    index: number;
+    textureCount: number;
+    meshCount: number;
+    missingMeshData: boolean;
+}
+
+interface ViewerFBXDiagnosticEntry {
+    category: string;
+    type: string;
+    message: string;
+    name?: string;
+}
+
+interface ViewerFBXDiagnosticSummary {
+    entries: ViewerFBXDiagnosticEntry[];
+    typeCounts: Map<string, number>;
+    sourceGeometryStats?: ViewerSourceGeometryStats;
+}
+
+interface ViewerSourceGeometryStats {
+    geometryCount: number;
+    normalGeometryCount: number;
+    tangentGeometryCount: number;
+    binormalGeometryCount: number;
+}
+
+type ViewerDiagnosticClass = "actionable" | "metadata" | "structure" | "other";
+
+interface ViewerStatusRow {
+    label: string;
+    value: string;
+    alert?: boolean;
+}
+
+const DIAGNOSTIC_CLASS_INFO: Record<ViewerDiagnosticClass, {
+    label: string;
+    priority: string;
+    maxTypes: number;
+    alert: boolean;
+}> = {
+    actionable: {
+        label: "Actionable gaps",
+        priority: "high priority",
+        maxTypes: 4,
+        alert: true,
+    },
+    structure: {
+        label: "Structure warnings",
+        priority: "review if visual issue",
+        maxTypes: 3,
+        alert: false,
+    },
+    metadata: {
+        label: "Metadata notes",
+        priority: "low priority",
+        maxTypes: 3,
+        alert: false,
+    },
+    other: {
+        label: "Other diagnostics",
+        priority: "info",
+        maxTypes: 3,
+        alert: false,
+    },
+};
 
 const UV_BUFFER_KINDS = [
     VertexBuffer.UVKind,
@@ -1690,26 +1926,55 @@ const UV_BUFFER_KINDS = [
 ];
 
 function getViewerFeatureStats(result: ISceneLoaderAsyncResult): ViewerFeatureStats {
-    let uvSetCount = 0;
     let hasVertexColors = false;
     let morphTargetCount = 0;
     let multiMaterialCount = 0;
     let alphaMaterialCount = 0;
+    let skinnedMeshCount = 0;
+    let normalMeshCount = 0;
+    let tangentMeshCount = 0;
+    let normalTextureMeshCount = 0;
     const multiMaterials = new Set<MultiMaterial>();
     const alphaMaterials = new Set<PBRMaterial | StandardMaterial>();
+    const normalTextureMaterials = new Set<PBRMaterial | StandardMaterial>();
+    const uvMeshCounts = new Map<number, number>();
+    const uvTextureSets = new Map<number, Set<string>>();
 
     for (const mesh of result.meshes) {
-        const meshUVSetCount = UV_BUFFER_KINDS.filter((kind) =>
-            mesh.isVerticesDataPresent(kind)
-        ).length;
-        uvSetCount = Math.max(uvSetCount, meshUVSetCount);
+        UV_BUFFER_KINDS.forEach((kind, index) => {
+            if (mesh.isVerticesDataPresent(kind)) {
+                uvMeshCounts.set(index, (uvMeshCounts.get(index) ?? 0) + 1);
+            }
+        });
 
         if (mesh.useVertexColors && mesh.isVerticesDataPresent(VertexBuffer.ColorKind)) {
             hasVertexColors = true;
         }
 
+        if (mesh.isVerticesDataPresent(VertexBuffer.NormalKind)) {
+            normalMeshCount++;
+        }
+
+        if (mesh.isVerticesDataPresent(VertexBuffer.TangentKind)) {
+            tangentMeshCount++;
+        }
+
+        if (mesh.skeleton) {
+            skinnedMeshCount++;
+        }
+
         if (mesh.morphTargetManager) {
             morphTargetCount += mesh.morphTargetManager.numTargets;
+        }
+
+        collectMaterialTexturesByUV(mesh.material, uvTextureSets);
+        const meshNormalTextureMaterials = new Set<PBRMaterial | StandardMaterial>();
+        collectNormalTextureMaterials(mesh.material, meshNormalTextureMaterials);
+        if (meshNormalTextureMaterials.size > 0) {
+            normalTextureMeshCount++;
+            for (const material of meshNormalTextureMaterials) {
+                normalTextureMaterials.add(material);
+            }
         }
 
         if (mesh.material instanceof MultiMaterial) {
@@ -1730,14 +1995,126 @@ function getViewerFeatureStats(result: ISceneLoaderAsyncResult): ViewerFeatureSt
 
     multiMaterialCount = multiMaterials.size;
     alphaMaterialCount = alphaMaterials.size;
+    const skeletonStats = getViewerSkeletonStats(result);
+    const maxUVIndex = Math.max(
+        -1,
+        ...uvMeshCounts.keys(),
+        ...uvTextureSets.keys()
+    );
+    const uvSets: ViewerUVSetStats[] = [];
+    for (let index = 0; index <= maxUVIndex; index++) {
+        const meshCount = uvMeshCounts.get(index) ?? 0;
+        const textureCount = uvTextureSets.get(index)?.size ?? 0;
+        uvSets.push({
+            index,
+            textureCount,
+            meshCount,
+            missingMeshData: textureCount > 0 && meshCount === 0,
+        });
+    }
 
     return {
-        uvSetCount,
+        uvSets,
+        normalMeshCount,
+        tangentMeshCount,
+        normalTextureMaterialCount: normalTextureMaterials.size,
+        normalTextureMeshCount,
         hasVertexColors,
         morphTargetCount,
         multiMaterialCount,
         alphaMaterialCount,
+        skinnedMeshCount,
+        skeletonCount: result.skeletons.length,
+        skeletonBoneCount: skeletonStats.boneCount,
+        skeletonRootCount: skeletonStats.rootCount,
+        skeletonMaxDepth: skeletonStats.maxDepth,
+        boneAttachmentCount: skeletonStats.boneAttachmentCount,
     };
+}
+
+function collectMaterialTexturesByUV(
+    material: unknown,
+    texturesByUV: Map<number, Set<string>>
+): void {
+    if (!material) return;
+    if (material instanceof MultiMaterial) {
+        for (const subMaterial of material.subMaterials) {
+            collectMaterialTexturesByUV(subMaterial, texturesByUV);
+        }
+        return;
+    }
+    if (!(material instanceof PBRMaterial) && !(material instanceof StandardMaterial)) return;
+
+    for (const texture of material.getActiveTextures()) {
+        const uvIndex = Number.isInteger(texture.coordinatesIndex) && texture.coordinatesIndex >= 0
+            ? texture.coordinatesIndex
+            : 0;
+        const textures = texturesByUV.get(uvIndex) ?? new Set<string>();
+        textures.add(getTextureIdentity(texture));
+        texturesByUV.set(uvIndex, textures);
+    }
+}
+
+function collectNormalTextureMaterials(
+    material: unknown,
+    materials: Set<PBRMaterial | StandardMaterial>
+): void {
+    if (!material) return;
+    if (material instanceof MultiMaterial) {
+        for (const subMaterial of material.subMaterials) {
+            collectNormalTextureMaterials(subMaterial, materials);
+        }
+        return;
+    }
+    if (!(material instanceof PBRMaterial) && !(material instanceof StandardMaterial)) return;
+    if (material.bumpTexture) {
+        materials.add(material);
+    }
+}
+
+function getTextureIdentity(texture: BaseTexture): string {
+    const url = "url" in texture && typeof texture.url === "string" ? texture.url : "";
+    return url || texture.name || String(texture.uniqueId);
+}
+
+function getViewerSkeletonStats(result: ISceneLoaderAsyncResult): {
+    boneCount: number;
+    rootCount: number;
+    maxDepth: number;
+    boneAttachmentCount: number;
+} {
+    let boneCount = 0;
+    let rootCount = 0;
+    let maxDepth = 0;
+    let boneAttachmentCount = 0;
+
+    for (const skeleton of result.skeletons) {
+        boneCount += skeleton.bones.length;
+        for (const bone of skeleton.bones) {
+            if (!bone.getParent()) {
+                rootCount++;
+            }
+            maxDepth = Math.max(maxDepth, getBoneDepth(bone));
+        }
+    }
+
+    for (const node of [...result.meshes, ...result.transformNodes]) {
+        if (isAttachedToBone(node)) {
+            boneAttachmentCount++;
+        }
+    }
+
+    return { boneCount, rootCount, maxDepth, boneAttachmentCount };
+}
+
+function getBoneDepth(bone: Bone): number {
+    let depth = 1;
+    let parent = bone.getParent();
+    while (parent) {
+        depth++;
+        parent = parent.getParent();
+    }
+    return depth;
 }
 
 function applyVertexColorUseOverride(result: ISceneLoaderAsyncResult, disableVertexColors: boolean): void {
@@ -1757,13 +2134,313 @@ function materialUsesAlpha(material: PBRMaterial | StandardMaterial): boolean {
         material.needAlphaTesting();
 }
 
-function appendFeatureStats(statusText: string, stats: ViewerFeatureStats): string {
-    if (stats.uvSetCount > 1) statusText += `, ${stats.uvSetCount} UV sets`;
-    if (stats.hasVertexColors) statusText += ", vertex colors";
-    if (stats.morphTargetCount > 0) statusText += `, ${stats.morphTargetCount} morph target(s)`;
-    if (stats.multiMaterialCount > 0) statusText += `, ${stats.multiMaterialCount} multi-material(s)`;
-    if (stats.alphaMaterialCount > 0) statusText += `, ${stats.alphaMaterialCount} alpha material(s)`;
-    return statusText;
+function buildViewerStatusRows(
+    stats: ViewerFeatureStats,
+    diagnostics: ViewerFBXDiagnosticSummary
+): ViewerStatusRow[] {
+    const rows: ViewerStatusRow[] = [];
+    const uvSummary = formatUVSummary(stats.uvSets);
+    if (uvSummary) {
+        rows.push({ label: "UVs", value: uvSummary, alert: stats.uvSets.some((uvSet) => uvSet.missingMeshData) });
+    }
+
+    const geometrySummary = formatGeometrySummary(stats);
+    if (geometrySummary) {
+        rows.push({ label: "Mesh data", value: geometrySummary });
+    }
+
+    if (stats.normalTextureMaterialCount > 0) {
+        rows.push({
+            label: "Normal textures",
+            value: [
+                formatCount(stats.normalTextureMaterialCount, "material"),
+                formatCount(stats.normalTextureMeshCount, "mesh", "meshes"),
+            ].join(", "),
+        });
+    }
+
+    const sourceGeometrySummary = diagnostics.sourceGeometryStats
+        ? formatSourceGeometrySummary(diagnostics.sourceGeometryStats)
+        : "";
+    if (sourceGeometrySummary) {
+        rows.push({ label: "FBX source data", value: sourceGeometrySummary });
+    }
+
+    const featureSummary = formatFeatureSummary(stats);
+    if (featureSummary) {
+        rows.push({ label: "Features", value: featureSummary });
+    }
+
+    const skeletonSummary = formatSkeletonSummary(stats);
+    if (skeletonSummary) {
+        rows.push({ label: "Skeletons", value: skeletonSummary, alert: stats.skeletonRootCount > stats.skeletonCount });
+    }
+
+    rows.push(...buildFBXDiagnosticRows(diagnostics));
+
+    return rows;
+}
+
+function formatUVSummary(uvSets: ViewerUVSetStats[]): string {
+    return uvSets
+        .map((uvSet) => {
+            const warning = uvSet.missingMeshData ? " (no mesh UV data)" : "";
+            return `UV${uvSet.index}: ${formatCount(uvSet.textureCount, "texture")}${warning}`;
+        })
+        .join(", ");
+}
+
+function formatGeometrySummary(stats: ViewerFeatureStats): string {
+    const parts: string[] = [];
+    if (stats.normalMeshCount > 0) {
+        parts.push(`${formatCount(stats.normalMeshCount, "mesh", "meshes")} with normals`);
+    }
+    if (stats.tangentMeshCount > 0) {
+        parts.push(`${formatCount(stats.tangentMeshCount, "mesh", "meshes")} with tangents`);
+    }
+    return parts.join(", ");
+}
+
+function formatSourceGeometrySummary(stats: ViewerSourceGeometryStats): string {
+    if (stats.geometryCount === 0) return "";
+    return [
+        `normals ${stats.normalGeometryCount}/${stats.geometryCount}`,
+        `tangents ${stats.tangentGeometryCount}/${stats.geometryCount}`,
+        `binormals ${stats.binormalGeometryCount}/${stats.geometryCount}`,
+    ].join(", ");
+}
+
+function formatFeatureSummary(stats: ViewerFeatureStats): string {
+    const features: string[] = [];
+    if (stats.hasVertexColors) features.push("vertex colors");
+    if (stats.morphTargetCount > 0) features.push(formatCount(stats.morphTargetCount, "morph target"));
+    if (stats.multiMaterialCount > 0) features.push(formatCount(stats.multiMaterialCount, "multi-material"));
+    if (stats.alphaMaterialCount > 0) features.push(formatCount(stats.alphaMaterialCount, "alpha material"));
+    if (stats.skinnedMeshCount > 0) features.push(formatCount(stats.skinnedMeshCount, "skinned mesh", "skinned meshes"));
+    return features.join(", ");
+}
+
+function formatSkeletonSummary(stats: ViewerFeatureStats): string {
+    if (stats.skeletonCount === 0) return "";
+
+    const summary = [
+        formatCount(stats.skeletonBoneCount, "bone"),
+        formatCount(stats.skeletonRootCount, "root"),
+        `depth ${stats.skeletonMaxDepth}`,
+    ];
+    if (stats.boneAttachmentCount > 0) {
+        summary.push(formatCount(stats.boneAttachmentCount, "bone-attached node"));
+    }
+    if (stats.skeletonRootCount > stats.skeletonCount) {
+        summary.push("multi-root skeleton");
+    }
+    return summary.join(", ");
+}
+
+function buildFBXDiagnosticRows(diagnostics: ViewerFBXDiagnosticSummary): ViewerStatusRow[] {
+    if (diagnostics.entries.length === 0) return [];
+
+    const entriesByClass = new Map<ViewerDiagnosticClass, ViewerFBXDiagnosticEntry[]>();
+    for (const entry of diagnostics.entries) {
+        const diagnosticClass = classifyFBXDiagnostic(entry);
+        const entries = entriesByClass.get(diagnosticClass) ?? [];
+        entries.push(entry);
+        entriesByClass.set(diagnosticClass, entries);
+    }
+
+    const rows: ViewerStatusRow[] = [];
+    for (const diagnosticClass of ["actionable", "structure", "metadata", "other"] as const) {
+        const entries = entriesByClass.get(diagnosticClass);
+        if (!entries || entries.length === 0) continue;
+
+        const typeCounts = countDiagnosticTypes(entries);
+        const info = DIAGNOSTIC_CLASS_INFO[diagnosticClass];
+        rows.push({
+            label: info.label,
+            value: `${info.priority}, ${formatCount(typeCounts.size, "type")}, ${formatCount(entries.length, "occurrence")}: ${formatDiagnosticTypeCounts(typeCounts, info.maxTypes)}`,
+            alert: info.alert,
+        });
+    }
+
+    return rows;
+}
+
+function countDiagnosticTypes(entries: ViewerFBXDiagnosticEntry[]): Map<string, number> {
+    const typeCounts = new Map<string, number>();
+    for (const entry of entries) {
+        typeCounts.set(entry.type, (typeCounts.get(entry.type) ?? 0) + 1);
+    }
+    return typeCounts;
+}
+
+function formatDiagnosticTypeCounts(typeCounts: Map<string, number>, maxTypes: number): string {
+    const typeSummaries = [...typeCounts.entries()]
+        .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+        .slice(0, maxTypes)
+        .map(([type, count]) => `${formatDiagnosticType(type)} x${count}`);
+    const hiddenCount = Math.max(0, typeCounts.size - typeSummaries.length);
+    const suffix = hiddenCount > 0 ? `, +${formatCount(hiddenCount, "type")}` : "";
+    return `${typeSummaries.join(", ")}${suffix}`;
+}
+
+function formatDiagnosticType(type: string): string {
+    return type.replace(/-/g, " ");
+}
+
+function formatCount(count: number, singular: string, plural = `${singular}s`): string {
+    return `${count} ${count === 1 ? singular : plural}`;
+}
+
+function getViewerFBXDiagnosticSummary(arrayBuffer: ArrayBuffer): ViewerFBXDiagnosticSummary {
+    try {
+        return summarizeFBXDiagnostics(interpretFBX(parseViewerFBXDocument(arrayBuffer)));
+    } catch (error) {
+        console.warn("Could not collect viewer FBX diagnostics", error);
+        return createViewerFBXDiagnosticSummary([{
+            category: "viewer",
+            type: "diagnostic-extraction-failed",
+            message: error instanceof Error ? error.message : String(error),
+        }]);
+    }
+}
+
+function parseViewerFBXDocument(arrayBuffer: ArrayBuffer): FBXDocument {
+    const header = decodeASCII(arrayBuffer, 0, Math.min(32, arrayBuffer.byteLength));
+    if (header.startsWith(FBX_BINARY_MAGIC)) {
+        return parseBinaryFBX(arrayBuffer);
+    }
+    if (header.startsWith(FBX_ASCII_MAGIC) || header.trimStart().startsWith(FBX_ASCII_MAGIC)) {
+        return parseAsciiFBX(new TextDecoder().decode(arrayBuffer));
+    }
+    throw new Error("Unrecognized FBX format");
+}
+
+function decodeASCII(arrayBuffer: ArrayBuffer, start: number, length: number): string {
+    const bytes = new Uint8Array(arrayBuffer, start, length);
+    let result = "";
+    for (const byte of bytes) {
+        result += String.fromCharCode(byte);
+    }
+    return result;
+}
+
+function summarizeFBXDiagnostics(fbxScene: FBXSceneData): ViewerFBXDiagnosticSummary {
+    const entries: ViewerFBXDiagnosticEntry[] = [];
+    const addDiagnostic = (category: string, type: string, message: string, name?: string) => {
+        entries.push({ category, type, message, name });
+    };
+
+    for (const diagnostic of fbxScene.diagnostics) {
+        addDiagnostic("scene", diagnostic.type, diagnostic.message, diagnostic.objectName);
+    }
+    for (const model of fbxScene.rootModels) {
+        collectModelDiagnostics(model, addDiagnostic);
+    }
+    for (const geometry of fbxScene.geometries) {
+        for (const diagnostic of geometry.diagnostics) {
+            addDiagnostic("geometry", diagnostic.type, diagnostic.message, geometry.name);
+        }
+    }
+    for (const skin of fbxScene.skins) {
+        for (const diagnostic of skin.diagnostics) {
+            addDiagnostic("skin", diagnostic.type, diagnostic.message, diagnostic.boneName);
+        }
+    }
+    for (const blendShape of fbxScene.blendShapes) {
+        for (const channel of blendShape.channels) {
+            for (const diagnostic of channel.diagnostics) {
+                addDiagnostic("blend-shape", diagnostic.type, diagnostic.message, diagnostic.channelName);
+            }
+        }
+    }
+    for (const animation of fbxScene.animations) {
+        for (const diagnostic of animation.diagnostics) {
+            addDiagnostic("animation", diagnostic.type, diagnostic.message, animation.name);
+        }
+    }
+    for (const camera of fbxScene.cameras) {
+        for (const diagnostic of camera.diagnostics) {
+            addDiagnostic("camera", "camera-diagnostic", diagnostic, camera.name);
+        }
+    }
+    for (const light of fbxScene.lights) {
+        for (const diagnostic of light.diagnostics) {
+            addDiagnostic("light", "light-diagnostic", diagnostic, light.name);
+        }
+    }
+
+    return createViewerFBXDiagnosticSummary(entries, getViewerSourceGeometryStats(fbxScene));
+}
+
+function getViewerSourceGeometryStats(fbxScene: FBXSceneData): ViewerSourceGeometryStats {
+    return {
+        geometryCount: fbxScene.geometries.length,
+        normalGeometryCount: fbxScene.geometries.filter((geometry) => Boolean(geometry.normals)).length,
+        tangentGeometryCount: fbxScene.geometries.filter((geometry) => Boolean(geometry.tangents)).length,
+        binormalGeometryCount: fbxScene.geometries.filter((geometry) => Boolean(geometry.binormals)).length,
+    };
+}
+
+function collectModelDiagnostics(
+    model: FBXSceneData["rootModels"][number],
+    addDiagnostic: (category: string, type: string, message: string, name?: string) => void
+): void {
+    for (const diagnostic of model.diagnostics) {
+        addDiagnostic("model", "non-default-transform-inheritance", diagnostic, model.name);
+    }
+    for (const child of model.children) {
+        collectModelDiagnostics(child, addDiagnostic);
+    }
+}
+
+function createViewerFBXDiagnosticSummary(
+    entries: ViewerFBXDiagnosticEntry[],
+    sourceGeometryStats?: ViewerSourceGeometryStats
+): ViewerFBXDiagnosticSummary {
+    const typeCounts = new Map<string, number>();
+    for (const entry of entries) {
+        typeCounts.set(entry.type, (typeCounts.get(entry.type) ?? 0) + 1);
+    }
+    return { entries, typeCounts, sourceGeometryStats };
+}
+
+function classifyFBXDiagnostic(entry: ViewerFBXDiagnosticEntry): ViewerDiagnosticClass {
+    switch (entry.type) {
+        case "unsupported-constraint":
+        case "unsupported-deformer":
+        case "unsupported-pose":
+        case "unsupported-layered-texture":
+        case "unsupported-curve-node":
+        case "multiple-animation-layers":
+        case "unsupported-layer-blend-mode":
+        case "partial-layer-weight":
+        case "non-default-transform-inheritance":
+        case "cluster-mode-runtime-unsupported":
+        case "missing-cluster-transform":
+        case "missing-cluster-transform-link":
+        case "missing-bind-pose-matrix":
+        case "full-weights-mismatch":
+        case "missing-full-weights":
+        case "diagnostic-extraction-failed":
+            return "actionable";
+
+        case "connection-graph":
+        case "degenerate-polygon":
+        case "triangulation-fallback":
+        case "layer-index-out-of-bounds":
+        case "layer-data-too-short":
+            return "structure";
+
+        case "unsupported-helper":
+        case "unsupported-node-attribute":
+        case "associate-model-present":
+        case "camera-diagnostic":
+        case "light-diagnostic":
+            return "metadata";
+
+        default:
+            return "other";
+    }
 }
 
 function getLoadedAssetTextureCount(
@@ -1857,9 +2534,10 @@ function collectMaterialTextureUrls(
 
 async function loadModel(index: number) {
     const model = models[index];
-    status.textContent = `Loading ${model.name}...`;
+    setStatusMessage(`Loading ${model.name}...`);
     let pbrTextureCount = 0;
     let assetTextureCount = 0;
+    let fbxDiagnostics = createViewerFBXDiagnosticSummary([]);
 
     disposeCurrentModel();
 
@@ -1882,6 +2560,7 @@ async function loadModel(index: number) {
             // Use our custom FBX loader
             const response = await fetch(model.url);
             const arrayBuffer = await response.arrayBuffer();
+            fbxDiagnostics = getViewerFBXDiagnosticSummary(arrayBuffer);
 
             const rootUrl = model.url.substring(0, model.url.lastIndexOf("/") + 1);
 
@@ -1905,7 +2584,7 @@ async function loadModel(index: number) {
                 model.textures,
                 model.forceOpaque ?? false
             );
-            applyPBRMaterialOverrides(model.pbrMaterialOverrides ?? [], model.forceOpaque ?? false);
+            await applyPBRMaterialOverrides(model.pbrMaterialOverrides ?? [], model.forceOpaque ?? false);
             applyLineArtSiblingAlbedo(currentResult, model.lineArtAlbedoOverrides ?? []);
             preloadViewerTextures(model.preloadTextures);
             assetTextureCount = getLoadedAssetTextureCount(currentResult, manifest, model);
@@ -1943,19 +2622,22 @@ async function loadModel(index: number) {
         const skelCount = currentResult.skeletons.length;
         const animCount = currentResult.animationGroups.length;
 
-        let statusText = `Loaded: ${meshCount} mesh(es)`;
-        if (skelCount > 0) statusText += `, ${skelCount} skeleton(s)`;
-        if (animCount > 0) statusText += `, ${animCount} animation(s)`;
-        if (assetTextureCount > 0) statusText += `, ${assetTextureCount} asset texture(s)`;
-        statusText = appendFeatureStats(statusText, getViewerFeatureStats(currentResult));
-        status.textContent = statusText;
+        const loadedParts = [formatCount(meshCount, "mesh", "meshes")];
+        if (skelCount > 0) loadedParts.push(formatCount(skelCount, "skeleton"));
+        if (animCount > 0) loadedParts.push(formatCount(animCount, "animation"));
+        if (assetTextureCount > 0) loadedParts.push(formatCount(assetTextureCount, "asset texture"));
+        const featureStats = getViewerFeatureStats(currentResult);
+        setStatusDetails(
+            `Loaded: ${loadedParts.join(", ")}`,
+            buildViewerStatusRows(featureStats, fbxDiagnostics)
+        );
 
         // Update animation UI
         updateAnimationUI(currentResult.animationGroups.length > 0
             ? currentResult.animationGroups
             : [], model.defaultAnimation);
     } catch (err: any) {
-        status.textContent = `Error: ${err.message}`;
+        setStatusMessage(`Error: ${err.message}`);
         console.error(err);
     }
 }
@@ -2112,7 +2794,7 @@ function pbrMaterialHasTextureForSlot(material: PBRMaterial, slot: string): bool
     }
 }
 
-function applyPBRMaterialOverrides(
+async function applyPBRMaterialOverrides(
     overrides: ViewerPBRMaterialOverride[],
     forceOpaque: boolean
 ) {
@@ -2128,6 +2810,14 @@ function applyPBRMaterialOverrides(
 
             if (override.albedoTextureHasAlpha && mat.albedoTexture) {
                 mat.albedoTexture.hasAlpha = true;
+            }
+
+            if (override.albedoColor) {
+                mat.albedoColor = Color3.FromArray(override.albedoColor);
+            }
+
+            if (override.emissiveColor) {
+                mat.emissiveColor = Color3.FromArray(override.emissiveColor);
             }
 
             if (override.metallic !== undefined) {
@@ -2150,6 +2840,16 @@ function applyPBRMaterialOverrides(
                 clearPBRMaterialOpacityTexture(mat);
             }
 
+            if (override.clearBumpTexture) {
+                mat.bumpTexture?.dispose();
+                mat.bumpTexture = null;
+            }
+
+            if (override.clearEmissiveTexture) {
+                mat.emissiveTexture?.dispose();
+                mat.emissiveTexture = null;
+            }
+
             if (override.backFaceCulling !== undefined) {
                 mat.backFaceCulling = override.backFaceCulling;
             }
@@ -2164,6 +2864,10 @@ function applyPBRMaterialOverrides(
 
             if (override.invertNormalMapY !== undefined) {
                 mat.invertNormalMapY = override.invertNormalMapY;
+            }
+
+            if (override.packedOrmTexture) {
+                await applyPackedORMTextureOverride(mat, override.packedOrmTexture);
             }
 
             if (override.clearCoat) {
@@ -2187,6 +2891,10 @@ function applyPBRMaterialOverrides(
             }
 
             applyPBRTransparencyModeOverride(mat, override.transparencyMode, forceOpaque);
+
+            if (override.needDepthPrePass !== undefined) {
+                mat.needDepthPrePass = override.needDepthPrePass;
+            }
         }
     }
 }
@@ -2216,6 +2924,103 @@ function applyLineArtSiblingAlbedo(
             subMaterials[i] = getLineArtAlbedoClone(material, albedoTexture, clonesBySource);
         }
     }
+}
+
+async function applyPackedORMTextureOverride(
+    material: PBRMaterial,
+    override: ViewerPackedORMTextureOverride
+): Promise<void> {
+    const texture = await createPackedORMTexture(override);
+    material.metallicTexture?.dispose();
+    material.microSurfaceTexture?.dispose();
+    if (material.ambientTexture && material.ambientTexture !== material.metallicTexture) {
+        material.ambientTexture.dispose();
+    }
+
+    material.metallicTexture = texture;
+    material.ambientTexture = texture;
+    material.microSurfaceTexture = null;
+    material.ambientTextureStrength = 1;
+    material.useAmbientInGrayScale = true;
+    material.useAmbientOcclusionFromMetallicTextureRed = false;
+    material.useRoughnessFromMetallicTextureAlpha = false;
+    material.useRoughnessFromMetallicTextureGreen = true;
+    material.useMetallnessFromMetallicTextureBlue = true;
+    material.metallic = 1;
+    material.roughness = 1;
+}
+
+async function createPackedORMTexture(override: ViewerPackedORMTextureOverride): Promise<Texture> {
+    const [occlusion, roughness, metallic] = await Promise.all([
+        loadImageData(override.occlusionPath),
+        loadImageData(override.roughnessPath),
+        loadImageData(override.metallicPath),
+    ]);
+    const width = roughness.width;
+    const height = roughness.height;
+    const packed = document.createElement("canvas");
+    packed.width = width;
+    packed.height = height;
+    const ctx = packed.getContext("2d");
+    if (!ctx) {
+        throw new Error("Unable to create canvas for packed ORM texture.");
+    }
+
+    const output = ctx.createImageData(width, height);
+    for (let i = 0; i < width * height; i++) {
+        const outputOffset = i * 4;
+        output.data[outputOffset] = getImageRedChannel(occlusion, i, width, height, true);
+        output.data[outputOffset + 1] = getImageRedChannel(roughness, i, width, height, true);
+        output.data[outputOffset + 2] = getImageRedChannel(metallic, i, width, height, true);
+        output.data[outputOffset + 3] = 255;
+    }
+    ctx.putImageData(output, 0, 0);
+
+    const texture = new Texture(packed.toDataURL("image/png"), scene, { invertY: false });
+    texture.name = override.name ?? getFileName(override.roughnessPath);
+    texture.gammaSpace = false;
+    return texture;
+}
+
+async function loadImageData(path: string): Promise<ImageData> {
+    const response = await fetch(assetUrl(path));
+    if (!response.ok) {
+        throw new Error(`Unable to load texture data from '${path}' (${response.status}).`);
+    }
+    const blob = await response.blob();
+    const image = await createImageBitmap(blob, {
+        colorSpaceConversion: "none",
+        imageOrientation: "none",
+        premultiplyAlpha: "none",
+    });
+
+    const canvas = document.createElement("canvas");
+    canvas.width = image.width;
+    canvas.height = image.height;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) {
+        image.close();
+        throw new Error(`Unable to read texture data from '${path}'.`);
+    }
+    ctx.drawImage(image, 0, 0);
+    const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+    image.close();
+    return imageData;
+}
+
+function getImageRedChannel(
+    image: ImageData,
+    outputIndex: number,
+    outputWidth: number,
+    outputHeight: number,
+    flipY = false
+): number {
+    const outputX = outputIndex % outputWidth;
+    const outputY = Math.floor(outputIndex / outputWidth);
+    const sourceX = Math.min(image.width - 1, Math.floor(outputX * image.width / outputWidth));
+    const sampledY = Math.min(image.height - 1, Math.floor(outputY * image.height / outputHeight));
+    const sourceY = flipY ? image.height - 1 - sampledY : sampledY;
+    return image.data[(sourceY * image.width + sourceX) * 4];
 }
 
 function findTexturedSiblingMaterial(
@@ -2521,6 +3326,6 @@ function toggleAnimation() {
 }
 
 main().catch((err) => {
-    status.textContent = `Error: ${err.message}`;
+    setStatusMessage(`Error: ${err.message}`);
     console.error(err);
 });

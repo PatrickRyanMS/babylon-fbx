@@ -51,6 +51,7 @@ import {
 
 const FBX_ASCII_MAGIC = "; FBX";
 const FBX_BINARY_MAGIC = "Kaydara FBX Binary";
+const BIND_REST_SCALE_RATIO_THRESHOLD = 10;
 
 /**
  * FBX file loader plugin for Babylon.js.
@@ -62,6 +63,8 @@ export class FBXFileLoader implements ISceneLoaderPluginAsync {
     public readonly extensions: ISceneLoaderPluginExtensions = {
         ".fbx": { isBinary: true },
     };
+
+    private readonly _bindRestBones = new WeakSet<Bone>();
 
     public async importMeshAsync(
         meshesNames: string | readonly string[] | null | undefined,
@@ -559,8 +562,9 @@ export class FBXFileLoader implements ISceneLoaderPluginAsync {
         vertexData.positions = positions;
         vertexData.indices = Array.from(geomData.indices);
 
+        let normals: Float32Array | undefined;
         if (geomData.normals) {
-            const normals = float64To32(geomData.normals);
+            normals = float64To32(geomData.normals);
             if (hasGeometricNormalTransform) {
                 for (let i = 0; i < normals.length; i += 3) {
                     const n = Vector3.TransformNormal(
@@ -598,7 +602,33 @@ export class FBXFileLoader implements ISceneLoaderPluginAsync {
         }
 
         if (geomData.tangents) {
-            vertexData.tangents = float64To32(geomData.tangents);
+            const tangents = float64To32(geomData.tangents);
+            if (hasGeometricNormalTransform) {
+                for (let i = 0; i < tangents.length; i += 4) {
+                    const t = Vector3.TransformNormal(
+                        new Vector3(tangents[i], tangents[i + 1], tangents[i + 2]),
+                        geometricNormalMatrix
+                    );
+                    if (t.lengthSquared() > 0) {
+                        t.normalize();
+                    }
+                    tangents[i] = t.x;
+                    tangents[i + 1] = t.y;
+                    tangents[i + 2] = t.z;
+                }
+            }
+            applyTangentHandednessScale(tangents, scene.useRightHandedSystem ? 1 : -1);
+            vertexData.tangents = tangents;
+        } else if (normals && vertexData.uvs) {
+            vertexData.tangents = generateTangents(
+                positions,
+                normals,
+                vertexData.uvs,
+                geomData.indices,
+                scene.useRightHandedSystem ? 1 : -1,
+                geomData.controlPointIndices,
+                geomData.materialIndices
+            );
         }
 
         if (geomData.colors) {
@@ -1062,6 +1092,9 @@ export class FBXFileLoader implements ISceneLoaderPluginAsync {
                 case "NormalMap":
                 case "NormalMapTexture":
                 case "normalCamera":
+                    material.bumpTexture = texture;
+                    FBXFileLoader._configureNormalTexture(texture, material, scene);
+                    break;
                 case "Bump":
                 case "BumpFactor":
                     material.bumpTexture = texture;
@@ -1120,6 +1153,16 @@ export class FBXFileLoader implements ISceneLoaderPluginAsync {
         }
 
         return material;
+    }
+
+    private static _configureNormalTexture(
+        texture: Texture,
+        material: StandardMaterial,
+        scene: Scene
+    ): void {
+        texture.gammaSpace = false;
+        material.invertNormalMapX = !scene.useRightHandedSystem;
+        material.invertNormalMapY = scene.useRightHandedSystem;
     }
 
     private static _isSupportedMaterialTextureSlot(propertyName: string): boolean {
@@ -1394,16 +1437,13 @@ export class FBXFileLoader implements ISceneLoaderPluginAsync {
     private _createSkeleton(skeletonId: string, bones: FBXBoneData[], scene: Scene): Skeleton {
         const skeleton = new Skeleton("Skeleton", `skeleton_${skeletonId}`, scene);
         const babylonBones: Bone[] = [];
-        const restLocalMatrices: Matrix[] = [];
-        const restAbsoluteMatrices: Matrix[] = [];
+        const authoredLocalMatrices: Matrix[] = [];
+        const authoredAbsoluteMatrices: Matrix[] = [];
 
-        // Phase 1: Create bones with localMatrix = computedLcl (the bone's rest pose
-        // from Lcl properties). This is what animation curves naturally target.
+        // Compute authored Lcl matrices for bones that do not carry FBX bind data.
         for (let i = 0; i < bones.length; i++) {
             const boneData = bones[i];
-            const parentBone = boneData.parentIndex >= 0 ? babylonBones[boneData.parentIndex] : null;
-
-            const computedLcl = FBXFileLoader._computeFBXLocalMatrix(
+            const authoredLocal = FBXFileLoader._computeFBXLocalMatrix(
                 boneData.translation,
                 boneData.rotation,
                 boneData.scale,
@@ -1415,21 +1455,10 @@ export class FBXFileLoader implements ISceneLoaderPluginAsync {
                 boneData.scalingOffset,
                 boneData.rotationOrder
             );
-            restLocalMatrices[i] = computedLcl;
-            restAbsoluteMatrices[i] = parentBone
-                ? computedLcl.multiply(restAbsoluteMatrices[boneData.parentIndex])
-                : computedLcl;
-
-            const bone = new Bone(
-                boneData.name,
-                skeleton,
-                parentBone,
-                computedLcl,   // localMatrix = rest pose (what animation drives)
-                null,          // restMatrix
-                null,          // bindMatrix (set in phase 2)
-                i              // index
-            );
-            babylonBones.push(bone);
+            authoredLocalMatrices[i] = authoredLocal;
+            authoredAbsoluteMatrices[i] = boneData.parentIndex >= 0
+                ? authoredLocal.multiply(authoredAbsoluteMatrices[boneData.parentIndex])
+                : authoredLocal;
         }
 
         const absoluteBindMatrices = bones.map((boneData, index) =>
@@ -1437,31 +1466,95 @@ export class FBXFileLoader implements ISceneLoaderPluginAsync {
                 ? Matrix.FromArray(boneData.transformLinkMatrix)
                 : boneData.modelBindPoseMatrix
                     ? Matrix.FromArray(boneData.modelBindPoseMatrix)
-                : restAbsoluteMatrices[index]
+                : authoredAbsoluteMatrices[index]
         );
 
-        // Phase 2: Set bind/rest matrices from FBX TransformLink. Maya-style
-        // files may omit some cluster bind entries, but still carry per-model
-        // BindPose matrices for helper/container bones.
-        for (let i = 0; i < bones.length; i++) {
-            const bone = babylonBones[i];
-            const absoluteBind = absoluteBindMatrices[i];
-
-            // Derive localBind = absoluteBind × inv(parentAbsoluteBind)
-            const parentBone = bone.getParent();
-            let localBind: Matrix;
-            if (parentBone) {
-                const parentAbsoluteBindInv = parentBone.getAbsoluteInverseBindMatrix();
-                localBind = absoluteBind.multiply(parentAbsoluteBindInv);
-            } else {
-                localBind = absoluteBind;
+        const localBindMatrices = absoluteBindMatrices.map((absoluteBind, index) => {
+            const parentIndex = bones[index].parentIndex;
+            if (parentIndex < 0) {
+                return absoluteBind;
             }
 
-            bone.updateMatrix(localBind, false, false);
-            bone._updateAbsoluteBindMatrices(undefined, false);
+            const parentAbsoluteBindInv = new Matrix();
+            absoluteBindMatrices[parentIndex].invertToRef(parentAbsoluteBindInv);
+            return absoluteBind.multiply(parentAbsoluteBindInv);
+        });
+        const useBindAsRest = FBXFileLoader._shouldUseBindMatricesAsRest(bones, authoredLocalMatrices, localBindMatrices);
+
+        // Most animation curves naturally target authored Lcl transforms. Use
+        // bind matrices as live rest pose only for rigs with severe bind/local
+        // scale disagreement, which otherwise produce invalid skin matrices.
+        // Only bones with that scale disagreement need their animation curves
+        // remapped into bind-rest space; ordinary child curves are already in
+        // the expected local animation space.
+        for (let i = 0; i < bones.length; i++) {
+            const localMatrix = useBindAsRest ? localBindMatrices[i] : authoredLocalMatrices[i];
+            const parentBone = bones[i].parentIndex >= 0 ? babylonBones[bones[i].parentIndex] : null;
+            const bone = new Bone(
+                bones[i].name,
+                skeleton,
+                parentBone,
+                localMatrix,
+                useBindAsRest ? localMatrix.clone() : null,
+                useBindAsRest ? localMatrix.clone() : null,
+                i
+            );
+            if (
+                useBindAsRest &&
+                bones[i].isCluster &&
+                FBXFileLoader._getMaxScaleRatio(authoredLocalMatrices[i], localBindMatrices[i]) >= BIND_REST_SCALE_RATIO_THRESHOLD
+            ) {
+                this._bindRestBones.add(bone);
+            }
+            babylonBones.push(bone);
+        }
+
+        if (!useBindAsRest) {
+            for (let i = 0; i < bones.length; i++) {
+                const bone = babylonBones[i];
+                bone.updateMatrix(localBindMatrices[i], false, false);
+                bone._updateAbsoluteBindMatrices(undefined, false);
+            }
         }
 
         return skeleton;
+    }
+
+    private static _shouldUseBindMatricesAsRest(
+        bones: FBXBoneData[],
+        authoredLocalMatrices: Matrix[],
+        localBindMatrices: Matrix[]
+    ): boolean {
+        return bones.some((bone, index) => {
+            if (!bone.isCluster) return false;
+            return FBXFileLoader._getMaxScaleRatio(authoredLocalMatrices[index], localBindMatrices[index]) >= BIND_REST_SCALE_RATIO_THRESHOLD;
+        });
+    }
+
+    private static _getMaxScaleRatio(a: Matrix, b: Matrix): number {
+        const scaleA = new Vector3();
+        const rotationA = new Quaternion();
+        const translationA = new Vector3();
+        const scaleB = new Vector3();
+        const rotationB = new Quaternion();
+        const translationB = new Vector3();
+        a.decompose(scaleA, rotationA, translationA);
+        b.decompose(scaleB, rotationB, translationB);
+
+        return Math.max(
+            FBXFileLoader._getScaleRatio(scaleA.x, scaleB.x),
+            FBXFileLoader._getScaleRatio(scaleA.y, scaleB.y),
+            FBXFileLoader._getScaleRatio(scaleA.z, scaleB.z)
+        );
+    }
+
+    private static _getScaleRatio(a: number, b: number): number {
+        const absA = Math.abs(a);
+        const absB = Math.abs(b);
+        if (absA < 1e-6 || absB < 1e-6) {
+            return absA < 1e-6 && absB < 1e-6 ? 1 : Number.POSITIVE_INFINITY;
+        }
+        return Math.max(absA / absB, absB / absA);
     }
 
     /**
@@ -1656,22 +1749,24 @@ export class FBXFileLoader implements ISceneLoaderPluginAsync {
         }
 
         // Process bone targets: compute full FBX local matrix per frame, decompose to TRS.
-        // Bind matrices handle skinning offsets; animation curves drive local bone transforms.
+        // For bind-rest rigs, only the bones recorded in _bindRestBones need their
+        // authored Lcl curves remapped onto the bind-rest local space.
         for (const [targetId, curveNodes] of boneCurves) {
             const bones = modelIdToBones.get(targetId);
             const modelData = modelIdToData.get(targetId);
             if (!bones || bones.length === 0 || !modelData) continue;
 
-            const animations = this._buildBoneAnimations(
-                curveNodes,
-                bones[0].name,
-                modelData,
-                animStack.startTime,
-                animStack.stopTime
-            );
             for (const bone of bones) {
+                const animations = this._buildBoneAnimations(
+                    curveNodes,
+                    bone.name,
+                    modelData,
+                    animStack.startTime,
+                    animStack.stopTime,
+                    this._bindRestBones.has(bone) ? bone.getBindMatrix() : undefined
+                );
                 for (const animation of animations) {
-                    animGroup.addTargetedAnimation(animation.clone(), bone);
+                    animGroup.addTargetedAnimation(animation, bone);
                 }
             }
         }
@@ -2266,6 +2361,302 @@ function float64To32(arr: Float64Array): Float32Array {
         result[i] = arr[i];
     }
     return result;
+}
+
+function generateTangents(
+    positions: ArrayLike<number>,
+    normals: ArrayLike<number>,
+    uvs: ArrayLike<number>,
+    indices: ArrayLike<number>,
+    handednessScale = 1,
+    controlPointIndices: ArrayLike<number> | null = null,
+    materialIndices: ArrayLike<number> | null = null
+): Float32Array {
+    const vertexCount = positions.length / 3;
+    const groups = new Map<string, TangentGroup>();
+    const vertexGroupKeys = new Array<string | null>(vertexCount).fill(null);
+
+    for (let i = 0; i + 2 < indices.length; i += 3) {
+        const materialIndex = materialIndices ? materialIndices[i / 3] : 0;
+        const i1 = indices[i];
+        const i2 = indices[i + 1];
+        const i3 = indices[i + 2];
+
+        const p1 = i1 * 3;
+        const p2 = i2 * 3;
+        const p3 = i3 * 3;
+        const uv1 = i1 * 2;
+        const uv2 = i2 * 2;
+        const uv3 = i3 * 2;
+
+        const x1 = positions[p2] - positions[p1];
+        const x2 = positions[p3] - positions[p1];
+        const y1 = positions[p2 + 1] - positions[p1 + 1];
+        const y2 = positions[p3 + 1] - positions[p1 + 1];
+        const z1 = positions[p2 + 2] - positions[p1 + 2];
+        const z2 = positions[p3 + 2] - positions[p1 + 2];
+
+        const s1 = uvs[uv2] - uvs[uv1];
+        const s2 = uvs[uv3] - uvs[uv1];
+        const t1 = uvs[uv2 + 1] - uvs[uv1 + 1];
+        const t2 = uvs[uv3 + 1] - uvs[uv1 + 1];
+        const denominator = s1 * t2 - s2 * t1;
+        if (Math.abs(denominator) < 1e-8) continue;
+
+        const r = 1 / denominator;
+        const sx = (t2 * x1 - t1 * x2) * r;
+        const sy = (t2 * y1 - t1 * y2) * r;
+        const sz = (t2 * z1 - t1 * z2) * r;
+        const bx = (s1 * x2 - s2 * x1) * r;
+        const by = (s1 * y2 - s2 * y1) * r;
+        const bz = (s1 * z2 - s2 * z1) * r;
+
+        accumulateTangentContribution(
+            i1,
+            i2,
+            i3,
+            sx,
+            sy,
+            sz,
+            bx,
+            by,
+            bz,
+            positions,
+            normals,
+            uvs,
+            controlPointIndices,
+            materialIndex,
+            groups,
+            vertexGroupKeys
+        );
+        accumulateTangentContribution(
+            i2,
+            i3,
+            i1,
+            sx,
+            sy,
+            sz,
+            bx,
+            by,
+            bz,
+            positions,
+            normals,
+            uvs,
+            controlPointIndices,
+            materialIndex,
+            groups,
+            vertexGroupKeys
+        );
+        accumulateTangentContribution(
+            i3,
+            i1,
+            i2,
+            sx,
+            sy,
+            sz,
+            bx,
+            by,
+            bz,
+            positions,
+            normals,
+            uvs,
+            controlPointIndices,
+            materialIndex,
+            groups,
+            vertexGroupKeys
+        );
+    }
+
+    const tangents = new Float32Array(vertexCount * 4);
+    for (let i = 0; i < vertexCount; i++) {
+        const no = i * 3;
+        const to = i * 4;
+        const [nx, ny, nz] = normalizeVector(normals[no], normals[no + 1], normals[no + 2]);
+        const group = vertexGroupKeys[i] ? groups.get(vertexGroupKeys[i]!) : undefined;
+        const tx = group?.tx ?? 0;
+        const ty = group?.ty ?? 0;
+        const tz = group?.tz ?? 0;
+        const normalDotTangent = nx * tx + ny * ty + nz * tz;
+
+        let ox = tx - nx * normalDotTangent;
+        let oy = ty - ny * normalDotTangent;
+        let oz = tz - nz * normalDotTangent;
+        const tangentLength = Math.hypot(ox, oy, oz);
+        if (tangentLength > 1e-8) {
+            ox /= tangentLength;
+            oy /= tangentLength;
+            oz /= tangentLength;
+        } else {
+            [ox, oy, oz] = buildFallbackTangent(nx, ny, nz);
+        }
+
+        const bx = group?.bx ?? 0;
+        const by = group?.by ?? 0;
+        const bz = group?.bz ?? 0;
+        const cx = ny * oz - nz * oy;
+        const cy = nz * ox - nx * oz;
+        const cz = nx * oy - ny * ox;
+        const bitangentLength = Math.hypot(bx, by, bz);
+        const handedness = (bitangentLength > 1e-8 && (cx * bx + cy * by + cz * bz) < 0 ? -1 : 1) * handednessScale;
+
+        tangents[to] = ox;
+        tangents[to + 1] = oy;
+        tangents[to + 2] = oz;
+        tangents[to + 3] = handedness;
+    }
+
+    return tangents;
+}
+
+interface TangentGroup {
+    tx: number;
+    ty: number;
+    tz: number;
+    bx: number;
+    by: number;
+    bz: number;
+}
+
+function accumulateTangentContribution(
+    vertexIndex: number,
+    nextIndex: number,
+    prevIndex: number,
+    tx: number,
+    ty: number,
+    tz: number,
+    bx: number,
+    by: number,
+    bz: number,
+    positions: ArrayLike<number>,
+    normals: ArrayLike<number>,
+    uvs: ArrayLike<number>,
+    controlPointIndices: ArrayLike<number> | null,
+    materialIndex: number,
+    groups: Map<string, TangentGroup>,
+    vertexGroupKeys: Array<string | null>
+): void {
+    const weight = computeCornerAngle(positions, vertexIndex, nextIndex, prevIndex);
+    if (weight <= 1e-8) return;
+
+    const key = buildTangentGroupKey(vertexIndex, tx, ty, tz, bx, by, bz, positions, normals, uvs, controlPointIndices, materialIndex);
+    let group = groups.get(key);
+    if (!group) {
+        group = { tx: 0, ty: 0, tz: 0, bx: 0, by: 0, bz: 0 };
+        groups.set(key, group);
+    }
+
+    group.tx += tx * weight;
+    group.ty += ty * weight;
+    group.tz += tz * weight;
+    group.bx += bx * weight;
+    group.by += by * weight;
+    group.bz += bz * weight;
+    vertexGroupKeys[vertexIndex] ??= key;
+}
+
+function buildTangentGroupKey(
+    vertexIndex: number,
+    tx: number,
+    ty: number,
+    tz: number,
+    bx: number,
+    by: number,
+    bz: number,
+    positions: ArrayLike<number>,
+    normals: ArrayLike<number>,
+    uvs: ArrayLike<number>,
+    controlPointIndices: ArrayLike<number> | null,
+    materialIndex: number
+): string {
+    const po = vertexIndex * 3;
+    const no = vertexIndex * 3;
+    const uo = vertexIndex * 2;
+    const [nx, ny, nz] = normalizeVector(normals[no], normals[no + 1], normals[no + 2]);
+    const handedness = computeTangentHandedness(nx, ny, nz, tx, ty, tz, bx, by, bz);
+    const positionKey = controlPointIndices
+        ? `cp:${controlPointIndices[vertexIndex]}`
+        : `p:${quantizeTangentKey(positions[po])},${quantizeTangentKey(positions[po + 1])},${quantizeTangentKey(positions[po + 2])}`;
+    return [
+        positionKey,
+        quantizeTangentKey(nx),
+        quantizeTangentKey(ny),
+        quantizeTangentKey(nz),
+        quantizeTangentKey(uvs[uo]),
+        quantizeTangentKey(uvs[uo + 1]),
+        handedness,
+        materialIndex,
+    ].join("|");
+}
+
+function computeTangentHandedness(
+    nx: number,
+    ny: number,
+    nz: number,
+    tx: number,
+    ty: number,
+    tz: number,
+    bx: number,
+    by: number,
+    bz: number
+): 1 | -1 {
+    const cx = ny * tz - nz * ty;
+    const cy = nz * tx - nx * tz;
+    const cz = nx * ty - ny * tx;
+    return (cx * bx + cy * by + cz * bz) < 0 ? -1 : 1;
+}
+
+function computeCornerAngle(
+    positions: ArrayLike<number>,
+    vertexIndex: number,
+    nextIndex: number,
+    prevIndex: number
+): number {
+    const vo = vertexIndex * 3;
+    const no = nextIndex * 3;
+    const po = prevIndex * 3;
+    const ax = positions[no] - positions[vo];
+    const ay = positions[no + 1] - positions[vo + 1];
+    const az = positions[no + 2] - positions[vo + 2];
+    const bx = positions[po] - positions[vo];
+    const by = positions[po + 1] - positions[vo + 1];
+    const bz = positions[po + 2] - positions[vo + 2];
+    const aLength = Math.hypot(ax, ay, az);
+    const bLength = Math.hypot(bx, by, bz);
+    if (aLength <= 1e-8 || bLength <= 1e-8) return 0;
+    const dot = (ax * bx + ay * by + az * bz) / (aLength * bLength);
+    return Math.acos(Math.max(-1, Math.min(1, dot)));
+}
+
+function normalizeVector(x: number, y: number, z: number): [number, number, number] {
+    const length = Math.hypot(x, y, z);
+    return length > 1e-8 ? [x / length, y / length, z / length] : [0, 0, 1];
+}
+
+function quantizeTangentKey(value: number): number {
+    const quantized = Math.round(value * 1e6);
+    return Object.is(quantized, -0) ? 0 : quantized;
+}
+
+function applyTangentHandednessScale(tangents: Float32Array, handednessScale: number): void {
+    if (handednessScale === 1) return;
+    for (let i = 3; i < tangents.length; i += 4) {
+        tangents[i] *= handednessScale;
+    }
+}
+
+function buildFallbackTangent(nx: number, ny: number, nz: number): [number, number, number] {
+    const ax = Math.abs(nx) < 0.9 ? 1 : 0;
+    const ay = ax === 1 ? 0 : 1;
+    const dot = nx * ax + ny * ay;
+    let tx = ax - nx * dot;
+    let ty = ay - ny * dot;
+    let tz = -nz * dot;
+    const length = Math.hypot(tx, ty, tz);
+    if (length <= 1e-8) return [1, 0, 0];
+    tx /= length;
+    ty /= length;
+    tz /= length;
+    return [tx, ty, tz];
 }
 
 function buildMorphTargetData(

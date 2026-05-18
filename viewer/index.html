@@ -10,6 +10,24 @@
             position: absolute; bottom: 10px; left: 10px;
             color: #eee; font-family: monospace; font-size: 13px;
             background: rgba(0,0,0,0.6); padding: 8px 12px; border-radius: 4px;
+            max-width: min(760px, calc(100vw - 44px));
+            line-height: 1.35;
+        }
+        #status .status-summary {
+            font-weight: 700;
+            margin-bottom: 4px;
+        }
+        #status .status-row {
+            display: grid;
+            grid-template-columns: max-content 1fr;
+            gap: 8px;
+        }
+        #status .status-label {
+            color: #9fd0ff;
+        }
+        #status .status-alert .status-label,
+        #status .status-alert .status-value {
+            color: #ffd27d;
         }
         #gui {
             position: absolute; top: 10px; left: 10px;

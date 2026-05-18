@@ -13,12 +13,15 @@ import { Camera } from "@babylonjs/core/Cameras/camera.js";
 import { SpotLight } from "@babylonjs/core/Lights/spotLight.js";
 
 import { FBXFileLoader } from "../src/fbxFileLoader.js";
+import type { FBXAnimationStackData, FBXCurveNodeData } from "../src/interpreter/animation.js";
 import type { FBXGeometryData } from "../src/interpreter/geometry.js";
 import type { FBXCameraData, FBXLightData, FBXModelData } from "../src/interpreter/fbxInterpreter.js";
 import type { FBXMaterialData } from "../src/interpreter/materials.js";
-import type { FBXSkinData } from "../src/interpreter/skeleton.js";
+import type { FBXBoneData, FBXSkinData } from "../src/interpreter/skeleton.js";
+import type { FBXRigData } from "../src/interpreter/rig.js";
 import type { FBXBlendShapeData } from "../src/interpreter/blendShapes.js";
 import { Material } from "@babylonjs/core/Materials/material.js";
+import type { AnimationGroup } from "@babylonjs/core/Animations/animationGroup.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -427,6 +430,198 @@ describe("FBXFileLoader", () => {
         engine.dispose();
     });
 
+    it("uses FBX bind matrices as skeleton rest pose when Lcl transforms differ", () => {
+        const engine = new NullEngine();
+        const scene = new Scene(engine);
+        const loader = new FBXFileLoader() as unknown as {
+            _createSkeleton: (
+                skeletonId: string,
+                bones: FBXBoneData[],
+                scene: Scene
+            ) => import("@babylonjs/core/Bones/skeleton.js").Skeleton;
+        };
+        const scaledBind = Matrix.Scaling(100, 100, 100);
+
+        const skeleton = loader._createSkeleton("bind-rest", [
+            createBone({
+                modelId: 1n,
+                name: "Armature",
+                scale: [100, 100, 100],
+                modelBindPoseMatrix: Float64Array.from(scaledBind.asArray()),
+            }),
+            createBone({
+                modelId: 2n,
+                name: "Root",
+                index: 1,
+                parentIndex: 0,
+                isCluster: true,
+                scale: [100, 100, 100],
+                transformLinkMatrix: Float64Array.from(scaledBind.asArray()),
+                modelBindPoseMatrix: Float64Array.from(scaledBind.asArray()),
+            }),
+        ], scene);
+        const mesh = new Mesh("SkinnedMesh", scene);
+        mesh.skeleton = skeleton;
+
+        const transformMatrices = skeleton.getTransformMatrices(mesh);
+        const rootFinalMatrix = Matrix.FromArray(Array.from(transformMatrices.slice(16, 32)));
+
+        expect(rootFinalMatrix.m[0]).toBeCloseTo(1, 6);
+        expect(rootFinalMatrix.m[5]).toBeCloseTo(1, 6);
+        expect(rootFinalMatrix.m[10]).toBeCloseTo(1, 6);
+        expect(rootFinalMatrix.m[12]).toBeCloseTo(0, 6);
+        expect(rootFinalMatrix.m[13]).toBeCloseTo(0, 6);
+        expect(rootFinalMatrix.m[14]).toBeCloseTo(0, 6);
+
+        scene.dispose();
+        engine.dispose();
+    });
+
+    it("keeps authored bone rest pose for working animated rigs with ordinary bind offsets", async () => {
+        const engine = new NullEngine();
+        const scene = new Scene(engine);
+        const file = readFileSync(aishaPath);
+        const buffer = file.buffer.slice(file.byteOffset, file.byteOffset + file.byteLength);
+        const rootUrl = `${pathToFileURL(dirname(aishaPath)).href}/`;
+
+        await new FBXFileLoader().importMeshAsync(null, scene, buffer, rootUrl);
+
+        const skeleton = scene.skeletons[0];
+        const rootBone = skeleton.bones.find((bone) => bone.name === "mainAisha:Root_M");
+        const shoulderBone = skeleton.bones.find((bone) => bone.name === "mainAisha:Shoulder_L");
+        expect(rootBone).toBeDefined();
+        expect(shoulderBone).toBeDefined();
+
+        expect(maxMatrixDifference(rootBone!.getLocalMatrix(), rootBone!.getBindMatrix())).toBeGreaterThan(0.5);
+        expect(maxMatrixDifference(shoulderBone!.getLocalMatrix(), shoulderBone!.getBindMatrix())).toBeGreaterThan(0.1);
+
+        scene.dispose();
+        engine.dispose();
+    });
+
+    it("does not let non-cluster helper scale force a whole skeleton into bind-rest mode", () => {
+        const engine = new NullEngine();
+        const scene = new Scene(engine);
+        const loader = new FBXFileLoader() as unknown as {
+            _createSkeleton: (
+                skeletonId: string,
+                bones: FBXBoneData[],
+                scene: Scene
+            ) => import("@babylonjs/core/Bones/skeleton.js").Skeleton;
+        };
+
+        const skeleton = loader._createSkeleton("helper-scale", [
+            createBone({
+                modelId: 1n,
+                name: "ScaledHelper",
+                scale: [100, 100, 100],
+                modelBindPoseMatrix: Float64Array.from(Matrix.Identity().asArray()),
+            }),
+            createBone({
+                modelId: 2n,
+                name: "DeformingBone",
+                index: 1,
+                parentIndex: 0,
+                isCluster: true,
+                transformLinkMatrix: Float64Array.from(Matrix.Identity().asArray()),
+                modelBindPoseMatrix: Float64Array.from(Matrix.Identity().asArray()),
+            }),
+        ], scene);
+
+        const helperScale = getMatrixScale(skeleton.bones[0].getLocalMatrix());
+        expect(helperScale.x).toBeCloseTo(100, 6);
+        expect(helperScale.y).toBeCloseTo(100, 6);
+        expect(helperScale.z).toBeCloseTo(100, 6);
+
+        scene.dispose();
+        engine.dispose();
+    });
+
+    it("remaps bind-rest animation only for bones with severe local scale mismatch", () => {
+        const engine = new NullEngine();
+        const scene = new Scene(engine);
+        const loader = new FBXFileLoader() as unknown as {
+            _createSkeleton: (
+                skeletonId: string,
+                bones: FBXBoneData[],
+                scene: Scene
+            ) => import("@babylonjs/core/Bones/skeleton.js").Skeleton;
+            _createAnimationGroup: (
+                animStack: FBXAnimationStackData,
+                rigs: FBXRigData[],
+                skeletonByRigId: Map<string, import("@babylonjs/core/Bones/skeleton.js").Skeleton>,
+                scene: Scene,
+                modelIdToNode: Map<bigint, TransformNode>,
+                modelIdToData: Map<bigint, FBXModelData>,
+                meshes: Mesh[]
+            ) => AnimationGroup | null;
+        };
+        const childBindLocal = Matrix.RotationY(Math.PI / 4);
+        const bones = [
+            createBone({
+                modelId: 1n,
+                name: "ScaledRoot",
+                scale: [100, 100, 100],
+                isCluster: true,
+                transformLinkMatrix: Float64Array.from(Matrix.Identity().asArray()),
+                modelBindPoseMatrix: Float64Array.from(Matrix.Identity().asArray()),
+            }),
+            createBone({
+                modelId: 2n,
+                name: "AnimatedChild",
+                index: 1,
+                parentIndex: 0,
+                isCluster: true,
+                transformLinkMatrix: Float64Array.from(childBindLocal.asArray()),
+                modelBindPoseMatrix: Float64Array.from(childBindLocal.asArray()),
+            }),
+        ];
+        const skeleton = loader._createSkeleton("selective-bind-rest", bones, scene);
+        const rig: FBXRigData = {
+            id: "rig",
+            rootModelIds: [1n],
+            bones,
+            modelIdToBoneIndex: new Map([[1n, 0], [2n, 1]]),
+            clusterModelIds: new Set([1n, 2n]),
+            skinBindings: [],
+            warnings: [],
+        };
+        const animStack: FBXAnimationStackData = {
+            name: "SyntheticAction",
+            startTime: 0,
+            stopTime: 1,
+            duration: 1,
+            curveNodes: [createCurveNode(2n, "R", [0, 0, 0])],
+            layers: [],
+            unsupportedCurveNodes: [],
+            diagnostics: [],
+        };
+
+        const group = loader._createAnimationGroup(
+            animStack,
+            [rig],
+            new Map([["rig", skeleton]]),
+            scene,
+            new Map(),
+            new Map([[2n, createModel({ id: 2n, name: "AnimatedChild", subType: "LimbNode" })]]),
+            []
+        );
+        const childRotation = group!.targetedAnimations.find((targetedAnimation) =>
+            targetedAnimation.target === skeleton.bones[1] &&
+            targetedAnimation.animation.targetProperty === "rotationQuaternion"
+        );
+        expect(childRotation).toBeDefined();
+
+        const firstKey = childRotation!.animation.getKeys()[0].value as Quaternion;
+        expect(firstKey.x).toBeCloseTo(0, 6);
+        expect(firstKey.y).toBeCloseTo(0, 6);
+        expect(firstKey.z).toBeCloseTo(0, 6);
+        expect(firstKey.w).toBeCloseTo(1, 6);
+
+        scene.dispose();
+        engine.dispose();
+    });
+
     it("uses glTF-style side orientation for FBX source meshes", () => {
         const loader = new FBXFileLoader() as unknown as {
             _createMesh: (model: FBXModelData, geomData: FBXGeometryData, scene: Scene) => Mesh;
@@ -448,6 +643,360 @@ describe("FBXFileLoader", () => {
         expect(rightHandedMesh.sideOrientation).toBe(Material.CounterClockWiseSideOrientation);
         rightHandedScene.dispose();
         rightHandedEngine.dispose();
+    });
+
+    it("generates tangents for normal-mapped geometry when FBX omits tangent layers", () => {
+        const engine = new NullEngine();
+        const scene = new Scene(engine);
+        const loader = new FBXFileLoader() as unknown as {
+            _createMesh: (model: FBXModelData, geomData: FBXGeometryData, scene: Scene) => Mesh;
+        };
+        const geomData = createTriangleGeometry({
+            uvs: new Float64Array([0, 0, 1, 0, 0, 1]),
+            uvSets: [{ name: "UVMap", data: new Float64Array([0, 0, 1, 0, 0, 1]) }],
+        });
+
+        const mesh = loader._createMesh(createModel({ geometry: geomData }), geomData, scene);
+        const tangents = mesh.getVerticesData(VertexBuffer.TangentKind);
+
+        expect(tangents).toBeDefined();
+        expect(tangents!.length).toBe(12);
+        for (let i = 0; i < tangents!.length; i += 4) {
+            expect(tangents![i]).toBeCloseTo(1, 6);
+            expect(tangents![i + 1]).toBeCloseTo(0, 6);
+            expect(tangents![i + 2]).toBeCloseTo(0, 6);
+            expect(tangents![i + 3]).toBeCloseTo(-1, 6);
+        }
+
+        scene.dispose();
+        engine.dispose();
+    });
+
+    it("smooths generated tangents across expanded duplicate polygon vertices", () => {
+        const engine = new NullEngine();
+        const scene = new Scene(engine);
+        const loader = new FBXFileLoader() as unknown as {
+            _createMesh: (model: FBXModelData, geomData: FBXGeometryData, scene: Scene) => Mesh;
+        };
+        const geomData = createTriangleGeometry({
+            positions: new Float64Array([
+                0, 0, 0,
+                1, 0, 0,
+                0, 1, 0,
+                0, 0, 0,
+                0, 1, 0,
+                -1, 0, 0,
+            ]),
+            indices: new Uint32Array([0, 1, 2, 3, 4, 5]),
+            normals: new Float64Array([
+                0, 0, 1,
+                0, 0, 1,
+                0, 0, 1,
+                0, 0, 1,
+                0, 0, 1,
+                0, 0, 1,
+            ]),
+            uvs: new Float64Array([
+                0, 0,
+                1, 0,
+                0, 1,
+                0, 0,
+                1, 0,
+                0, 1,
+            ]),
+            uvSets: [{
+                name: "UVMap",
+                data: new Float64Array([
+                    0, 0,
+                    1, 0,
+                    0, 1,
+                    0, 0,
+                    1, 0,
+                    0, 1,
+                ]),
+            }],
+            controlPointIndices: new Uint32Array([0, 1, 2, 0, 2, 3]),
+        });
+
+        const mesh = loader._createMesh(createModel({ geometry: geomData }), geomData, scene);
+        const tangents = mesh.getVerticesData(VertexBuffer.TangentKind);
+        const sqrtHalf = Math.SQRT1_2;
+
+        expect(tangents).toBeDefined();
+        expect(tangents![0]).toBeCloseTo(sqrtHalf, 6);
+        expect(tangents![1]).toBeCloseTo(sqrtHalf, 6);
+        expect(tangents![3]).toBeCloseTo(-1, 6);
+        expect(tangents![12]).toBeCloseTo(sqrtHalf, 6);
+        expect(tangents![13]).toBeCloseTo(sqrtHalf, 6);
+        expect(tangents![15]).toBeCloseTo(-1, 6);
+
+        scene.dispose();
+        engine.dispose();
+    });
+
+    it("does not smooth generated tangents across mirrored UV islands", () => {
+        const engine = new NullEngine();
+        const scene = new Scene(engine);
+        const loader = new FBXFileLoader() as unknown as {
+            _createMesh: (model: FBXModelData, geomData: FBXGeometryData, scene: Scene) => Mesh;
+        };
+        const geomData = createTriangleGeometry({
+            positions: new Float64Array([
+                0, 0, 0,
+                1, 0, 0,
+                0, 1, 0,
+                0, 0, 0,
+                -1, 0, 0,
+                0, 1, 0,
+            ]),
+            indices: new Uint32Array([0, 1, 2, 3, 4, 5]),
+            normals: new Float64Array([
+                0, 0, 1,
+                0, 0, 1,
+                0, 0, 1,
+                0, 0, 1,
+                0, 0, 1,
+                0, 0, 1,
+            ]),
+            uvs: new Float64Array([
+                0, 0,
+                1, 0,
+                0, 1,
+                0, 0,
+                1, 0,
+                0, 1,
+            ]),
+            uvSets: [{
+                name: "UVMap",
+                data: new Float64Array([
+                    0, 0,
+                    1, 0,
+                    0, 1,
+                    0, 0,
+                    1, 0,
+                    0, 1,
+                ]),
+            }],
+            controlPointIndices: new Uint32Array([0, 1, 2, 0, 3, 2]),
+        });
+
+        const mesh = loader._createMesh(createModel({ geometry: geomData }), geomData, scene);
+        const tangents = mesh.getVerticesData(VertexBuffer.TangentKind);
+
+        expect(tangents).toBeDefined();
+        expect(tangents![0]).toBeCloseTo(1, 6);
+        expect(tangents![1]).toBeCloseTo(0, 6);
+        expect(tangents![3]).toBeCloseTo(-1, 6);
+        expect(tangents![12]).toBeCloseTo(-1, 6);
+        expect(tangents![13]).toBeCloseTo(0, 6);
+        expect(tangents![15]).toBeCloseTo(1, 6);
+
+        scene.dispose();
+        engine.dispose();
+    });
+
+    it("does not smooth generated tangents across material seams", () => {
+        const engine = new NullEngine();
+        const scene = new Scene(engine);
+        const loader = new FBXFileLoader() as unknown as {
+            _createMesh: (model: FBXModelData, geomData: FBXGeometryData, scene: Scene) => Mesh;
+        };
+        const geomData = createTriangleGeometry({
+            positions: new Float64Array([
+                0, 0, 0,
+                1, 0, 0,
+                0, 1, 0,
+                0, 0, 0,
+                0, 1, 0,
+                -1, 0, 0,
+            ]),
+            indices: new Uint32Array([0, 1, 2, 3, 4, 5]),
+            normals: new Float64Array([
+                0, 0, 1,
+                0, 0, 1,
+                0, 0, 1,
+                0, 0, 1,
+                0, 0, 1,
+                0, 0, 1,
+            ]),
+            uvs: new Float64Array([
+                0, 0,
+                1, 0,
+                0, 1,
+                0, 0,
+                1, 0,
+                0, 1,
+            ]),
+            uvSets: [{
+                name: "UVMap",
+                data: new Float64Array([
+                    0, 0,
+                    1, 0,
+                    0, 1,
+                    0, 0,
+                    1, 0,
+                    0, 1,
+                ]),
+            }],
+            controlPointIndices: new Uint32Array([0, 1, 2, 0, 2, 3]),
+            materialIndices: new Int32Array([0, 1]),
+        });
+
+        const mesh = loader._createMesh(createModel({ geometry: geomData }), geomData, scene);
+        const tangents = mesh.getVerticesData(VertexBuffer.TangentKind);
+
+        expect(tangents).toBeDefined();
+        expect(tangents![0]).toBeCloseTo(1, 6);
+        expect(tangents![1]).toBeCloseTo(0, 6);
+        expect(tangents![3]).toBeCloseTo(-1, 6);
+        expect(tangents![12]).toBeCloseTo(0, 6);
+        expect(tangents![13]).toBeCloseTo(1, 6);
+        expect(tangents![15]).toBeCloseTo(-1, 6);
+
+        scene.dispose();
+        engine.dispose();
+    });
+
+    it("keeps right-handed scene tangent handedness unmirrored", () => {
+        const engine = new NullEngine();
+        const scene = new Scene(engine);
+        scene.useRightHandedSystem = true;
+        const loader = new FBXFileLoader() as unknown as {
+            _createMesh: (model: FBXModelData, geomData: FBXGeometryData, scene: Scene) => Mesh;
+        };
+        const geomData = createTriangleGeometry({
+            uvs: new Float64Array([0, 0, 1, 0, 0, 1]),
+            uvSets: [{ name: "UVMap", data: new Float64Array([0, 0, 1, 0, 0, 1]) }],
+        });
+
+        const mesh = loader._createMesh(createModel({ geometry: geomData }), geomData, scene);
+        const tangents = mesh.getVerticesData(VertexBuffer.TangentKind);
+
+        expect(tangents).toBeDefined();
+        for (let i = 3; i < tangents!.length; i += 4) {
+            expect(tangents![i]).toBeCloseTo(1, 6);
+        }
+
+        scene.dispose();
+        engine.dispose();
+    });
+
+    it("mirrors source tangent handedness under the FBX handedness root", () => {
+        const engine = new NullEngine();
+        const scene = new Scene(engine);
+        const loader = new FBXFileLoader() as unknown as {
+            _createMesh: (model: FBXModelData, geomData: FBXGeometryData, scene: Scene) => Mesh;
+        };
+        const geomData = createTriangleGeometry({
+            tangents: new Float64Array([
+                1, 0, 0, 1,
+                1, 0, 0, 1,
+                1, 0, 0, 1,
+            ]),
+        });
+
+        const mesh = loader._createMesh(createModel({ geometry: geomData }), geomData, scene);
+        const tangents = mesh.getVerticesData(VertexBuffer.TangentKind);
+
+        expect(tangents).toBeDefined();
+        for (let i = 3; i < tangents!.length; i += 4) {
+            expect(tangents![i]).toBeCloseTo(-1, 6);
+        }
+
+        scene.dispose();
+        engine.dispose();
+    });
+
+    it("configures FBX normal maps as non-color data with Babylon handedness inversions", () => {
+        const engine = new NullEngine();
+        const scene = new Scene(engine);
+        const loader = new FBXFileLoader() as unknown as {
+            _createMaterial: (matData: FBXMaterialData, scene: Scene, rootUrl: string) => StandardMaterial;
+        };
+        const materialData: FBXMaterialData = {
+            id: 1n,
+            name: "SyntheticMaterial",
+            type: "Phong",
+            properties: {},
+            textures: [{
+                propertyName: "NormalMap",
+                fileName: "normal.png",
+                relativeFileName: "normal.png",
+                id: 2n,
+                embeddedData: null,
+            }],
+        };
+
+        const material = loader._createMaterial(materialData, scene, "file:///textures/");
+
+        expect(material.bumpTexture?.gammaSpace).toBe(false);
+        expect(material.invertNormalMapX).toBe(true);
+        expect(material.invertNormalMapY).toBe(false);
+
+        scene.dispose();
+        engine.dispose();
+    });
+
+    it("configures right-handed FBX normal maps with matching Babylon handedness inversions", () => {
+        const engine = new NullEngine();
+        const scene = new Scene(engine);
+        scene.useRightHandedSystem = true;
+        const loader = new FBXFileLoader() as unknown as {
+            _createMaterial: (matData: FBXMaterialData, scene: Scene, rootUrl: string) => StandardMaterial;
+        };
+        const materialData: FBXMaterialData = {
+            id: 1n,
+            name: "SyntheticMaterial",
+            type: "Phong",
+            properties: {},
+            textures: [{
+                propertyName: "NormalMap",
+                fileName: "normal.png",
+                relativeFileName: "normal.png",
+                id: 2n,
+                embeddedData: null,
+            }],
+        };
+
+        const material = loader._createMaterial(materialData, scene, "file:///textures/");
+
+        expect(material.bumpTexture?.gammaSpace).toBe(false);
+        expect(material.invertNormalMapX).toBe(false);
+        expect(material.invertNormalMapY).toBe(true);
+
+        scene.dispose();
+        engine.dispose();
+    });
+
+    it("does not apply tangent-space normal map settings to FBX bump height maps", () => {
+        const engine = new NullEngine();
+        const scene = new Scene(engine);
+        const loader = new FBXFileLoader() as unknown as {
+            _createMaterial: (matData: FBXMaterialData, scene: Scene, rootUrl: string) => StandardMaterial;
+        };
+        const materialData: FBXMaterialData = {
+            id: 1n,
+            name: "SyntheticMaterial",
+            type: "Phong",
+            properties: {},
+            textures: [{
+                propertyName: "Bump",
+                fileName: "height.png",
+                relativeFileName: "height.png",
+                id: 2n,
+                embeddedData: null,
+            }],
+        };
+
+        const material = loader._createMaterial(materialData, scene, "file:///textures/");
+
+        expect(material.bumpTexture).toBeDefined();
+        expect(material.bumpTexture?.gammaSpace).toBe(true);
+        expect(material.invertNormalMapX).toBe(false);
+        expect(material.invertNormalMapY).toBe(false);
+
+        scene.dispose();
+        engine.dispose();
     });
 
     it("bakes geometric transforms with translation after rotation and scale", () => {
@@ -548,7 +1097,7 @@ describe("FBXFileLoader", () => {
     });
 });
 
-function createTriangleGeometry(): FBXGeometryData {
+function createTriangleGeometry(overrides: Partial<FBXGeometryData> = {}): FBXGeometryData {
     return {
         id: 1n,
         name: "SyntheticGeometry",
@@ -563,6 +1112,35 @@ function createTriangleGeometry(): FBXGeometryData {
         controlPointIndices: new Uint32Array([0, 1, 2]),
         materialIndices: null,
         diagnostics: [],
+        ...overrides,
+    };
+}
+
+function createBone(overrides: Partial<FBXBoneData>): FBXBoneData {
+    return {
+        modelId: 1n,
+        name: "SyntheticBone",
+        index: 0,
+        parentIndex: -1,
+        isCluster: false,
+        translation: [0, 0, 0],
+        rotation: [0, 0, 0],
+        preRotation: [0, 0, 0],
+        postRotation: [0, 0, 0],
+        rotationPivot: [0, 0, 0],
+        scalingPivot: [0, 0, 0],
+        rotationOffset: [0, 0, 0],
+        scalingOffset: [0, 0, 0],
+        scale: [1, 1, 1],
+        rotationOrder: 0,
+        inheritType: 1,
+        clusterMode: "Unknown",
+        bindPoseMatrix: null,
+        transformLinkMatrix: null,
+        transformAssociateModelMatrix: null,
+        modelBindPoseMatrix: null,
+        diagnostics: [],
+        ...overrides,
     };
 }
 
@@ -591,6 +1169,36 @@ function createModel(overrides: Partial<FBXModelData>): FBXModelData {
         diagnostics: [],
         ...overrides,
     };
+}
+
+function createCurveNode(targetModelId: bigint, type: "T" | "R" | "S", values: [number, number, number]): FBXCurveNodeData {
+    return {
+        type,
+        targetModelId,
+        curves: ["d|X", "d|Y", "d|Z"].map((channel, index) => ({
+            channel,
+            keys: [
+                { time: 0, value: values[index], interpolation: "linear" },
+                { time: 1, value: values[index], interpolation: "linear" },
+            ],
+        })),
+    };
+}
+
+function maxMatrixDifference(a: Matrix, b: Matrix): number {
+    let maxDifference = 0;
+    for (let i = 0; i < 16; i++) {
+        maxDifference = Math.max(maxDifference, Math.abs(a.m[i] - b.m[i]));
+    }
+    return maxDifference;
+}
+
+function getMatrixScale(matrix: Matrix): Vector3 {
+    const scale = new Vector3();
+    const rotation = new Quaternion();
+    const translation = new Vector3();
+    matrix.decompose(scale, rotation, translation);
+    return scale;
 }
 
 function expectMeshCenter(scene: Scene, name: string, expected: [number, number, number]): void {
