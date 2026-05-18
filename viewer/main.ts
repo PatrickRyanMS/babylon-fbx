@@ -100,8 +100,19 @@ interface ViewerPBRClearCoatOverride {
 
 interface ViewerPBRSubSurfaceOverride {
     isRefractionEnabled?: boolean;
+    isScatteringEnabled?: boolean;
+    isTranslucencyEnabled?: boolean;
     refractionIntensity?: number;
+    translucencyIntensity?: number;
+    minimumThickness?: number;
+    maximumThickness?: number;
+    useGltfStyleTextures?: boolean;
+    useThicknessAsDepth?: boolean;
+    linkRefractionWithTransparency?: boolean;
+    volumeIndexOfRefraction?: number;
+    tintColorAtDistance?: number;
     useAlbedoToTintRefraction?: boolean;
+    useAlbedoToTintTranslucency?: boolean;
 }
 
 interface ViewerPBRMaterialTextureAlias {
@@ -159,6 +170,7 @@ interface ModelEntry {
     url: string;
     /** "fbx" uses our custom loader, "glb" uses Babylon's built-in GLTF loader */
     format: "fbx" | "glb";
+    hasFormatPair: boolean;
     /** Legacy manual texture overrides; FBX models now use the viewer-only PBR manifest path. */
     textures: ViewerTextureOverride[];
     preloadTextures: ViewerTexturePreload[];
@@ -240,6 +252,39 @@ const modelOverrides: Record<string, ViewerModelOverride> = {
             { materialName: "EVSB_FISH2:fish_MAT", unlit: true },
         ],
     },
+    "chernovan-nemesis/Chernovan Nemesis.fbx": {
+        name: "Chernovan Nemesis",
+        textures: [
+            { slot: "ambientOcclusion", path: "chernovan-nemesis/HullInside_2_Mixed_AO.png", materialName: "HullInside" },
+            { slot: "metallic", path: "chernovan-nemesis/HullInside_2_Metallic.png", materialName: "HullInside" },
+            { slot: "normal", path: "chernovan-nemesis/HullInside_2_Normal_DirectX.png", materialName: "HullInside" },
+            { slot: "roughness", path: "chernovan-nemesis/HullInside_2_Roughness.png", materialName: "HullInside" },
+            { slot: "diffuse", path: "chernovan-nemesis/Instruments.png", materialName: "Instruments" },
+            { slot: "diffuse", path: "chernovan-nemesis/Wheels.png", materialName: "Wheel" },
+        ],
+        pbrMaterialOverrides: [
+            {
+                materialName: "Glass",
+                alpha: 0.5,
+                subSurface: {
+                    minimumThickness: 0,
+                    maximumThickness: 1,
+                    useGltfStyleTextures: true,
+                    useThicknessAsDepth: false,
+                    isScatteringEnabled: true,
+                    isRefractionEnabled: true,
+                    refractionIntensity: 1,
+                    volumeIndexOfRefraction: 1.5,
+                    tintColorAtDistance: 0,
+                    linkRefractionWithTransparency: false,
+                    useAlbedoToTintRefraction: true,
+                    isTranslucencyEnabled: true,
+                    translucencyIntensity: 1,
+                    useAlbedoToTintTranslucency: true,
+                },
+            },
+        ],
+    },
     "etrian-odyssey-3-monk/EOMonk.fbx": {
         name: "Etrian Odyssey 3 Monk",
         textures: [
@@ -308,13 +353,15 @@ const modelOverrides: Record<string, ViewerModelOverride> = {
     "stylized-ww1-plane/PlaneAnimated with toon.fbx": {
         name: "WW1 Plane (animated)",
         textures: [
-            { slot: "diffuse", path: "stylized-ww1-plane/RGB.jpeg" },
+            { slot: "diffuse", path: "stylized-ww1-plane/RGB.jpeg", materialName: "pasted__lambert2" },
         ],
         pbrMaterialOverrides: [
+            { materialName: "Tooner", backFaceCulling: true },
             {
                 materialName: "Blur_effect",
                 albedoTextureHasAlpha: true,
                 useAlphaFromAlbedoTexture: true,
+                clearOpacityTexture: true,
             },
         ],
     },
@@ -727,6 +774,7 @@ function buildModelCatalog(): ModelEntry[] {
                 path,
                 url: assetUrl(path),
                 format: inferModelFormat(path),
+                hasFormatPair,
                 textures: resolveTextureOverrides(override.textures),
                 preloadTextures: resolveTexturePreloads(override.preloadTextures),
                 pbrMaterialOverrides: override.pbrMaterialOverrides,
@@ -758,24 +806,30 @@ function getPairedFormatDirectories(modelPaths: string[]): Set<string> {
     );
 }
 
-function modelEntryDisplayName(path: string, overrideName: string | undefined, hasFormatPair: boolean): string {
-    const baseName = stripManualFormatSuffix(overrideName ?? modelDisplayName(path));
-    if (!hasFormatPair) return baseName;
-
+function modelEntryDisplayName(
+    path: string,
+    overrideName: string | undefined,
+    hasFormatPair: boolean
+): string {
+    const baseName = stripManualLabelSuffix(overrideName ?? modelDisplayName(path));
     const format = inferModelFormat(path).toUpperCase();
+    const labels = hasFormatPair ? [format] : [];
+
+    if (labels.length === 0) return baseName;
+
     const parentheticalMatch = baseName.match(/^(.*)\(([^()]*)\)\s*$/);
     if (parentheticalMatch) {
-        return `${parentheticalMatch[1].trimEnd()} (${parentheticalMatch[2]}, ${format})`;
+        return `${parentheticalMatch[1].trimEnd()} (${parentheticalMatch[2]}, ${labels.join(", ")})`;
     }
-    return `${baseName} (${format})`;
+    return `${baseName} (${labels.join(", ")})`;
 }
 
-function stripManualFormatSuffix(name: string): string {
+function stripManualLabelSuffix(name: string): string {
     return name
         .replace(/\s*\((FBX|GLB)\s+reference\)$/i, "")
-        .replace(/\s*\((FBX|GLB),\s*animated\)$/i, " (animated)")
-        .replace(/\s*\((animated),\s*(FBX|GLB)\)$/i, " (animated)")
-        .replace(/\s*\((FBX|GLB)\)$/i, "");
+        .replace(/\s*\((FBX|GLB),\s*animated\)$/i, "")
+        .replace(/\s*\((animated),\s*(FBX|GLB)\)$/i, "")
+        .replace(/\s*\((FBX|GLB|animated)\)$/i, "");
 }
 
 function resolveTextureOverrides(textures: ViewerTextureOverrideSource[] = []): ViewerTextureOverride[] {
@@ -1025,6 +1079,8 @@ let engine: Engine;
 let scene: Scene;
 let camera: ArcRotateCamera;
 let currentResult: ISceneLoaderAsyncResult | null = null;
+let defaultCameraLayerMask = 0x0fffffff;
+let activeLoadId = 0;
 
 function setStatusMessage(message: string): void {
     status.textContent = message;
@@ -1059,13 +1115,14 @@ async function main() {
     const canvas = document.getElementById("renderCanvas") as HTMLCanvasElement;
     engine = new Engine(canvas, true);
     scene = new Scene(engine);
-    scene.clearColor = new Color4(0.1, 0.1, 0.12, 1);
+    scene.clearColor = Color4.FromHexString("#212121FF");
 
     // Camera — slightly above looking down
     camera = new ArcRotateCamera("camera", 5.42, 1.12, 30, Vector3.Zero(), scene);
     camera.attachControl(canvas, true);
     camera.wheelPrecision = 10;
     camera.lowerRadiusLimit = 1.0;
+    defaultCameraLayerMask = camera.layerMask;
 
     scene.environmentTexture = CubeTexture.CreateFromPrefilteredData(studioEnvironmentUrl, scene);
     scene.environmentIntensity = 1.0;
@@ -1203,10 +1260,7 @@ function setStartupModel(model: ModelEntry) {
 function disposeCurrentModel() {
     if (!currentResult) return;
 
-    for (const ag of currentResult.animationGroups) ag.dispose();
-    for (const m of currentResult.meshes) m.dispose();
-    for (const tn of currentResult.transformNodes) tn.dispose();
-    for (const sk of currentResult.skeletons) sk.dispose();
+    disposeImportedResult(currentResult);
 
     const multiMaterialsToDispose = [...scene.multiMaterials];
     for (const mat of multiMaterialsToDispose) {
@@ -1237,6 +1291,23 @@ function disposeCurrentModel() {
     }
 
     currentResult = null;
+}
+
+function disposeImportedResult(result: ISceneLoaderAsyncResult): void {
+    const materials = getLoadedAssetMaterials(result);
+
+    for (const ag of result.animationGroups) ag.dispose();
+    for (const m of result.meshes) m.dispose();
+    for (const tn of result.transformNodes) tn.dispose();
+    for (const sk of result.skeletons) sk.dispose();
+
+    for (const material of materials) {
+        if (material instanceof MultiMaterial) {
+            material.dispose();
+        } else {
+            material.dispose(true, true);
+        }
+    }
 }
 
 function applyViewerPBRMaterials(
@@ -1940,6 +2011,8 @@ function isAttachedToBone(node: unknown): boolean {
 }
 
 interface ViewerFeatureStats {
+    vertexCount: number;
+    faceCount: number;
     uvSets: ViewerUVSetStats[];
     normalMeshCount: number;
     tangentMeshCount: number;
@@ -1992,6 +2065,13 @@ interface ViewerStatusRow {
     alert?: boolean;
 }
 
+interface ViewerAssetSizeStats {
+    modelFormat: string;
+    modelBytes: number | null;
+    textureBytes: number | null;
+    textureCount: number;
+}
+
 const DIAGNOSTIC_CLASS_INFO: Record<ViewerDiagnosticClass, {
     label: string;
     priority: string;
@@ -2034,6 +2114,8 @@ const UV_BUFFER_KINDS = [
 ];
 
 function getViewerFeatureStats(result: ISceneLoaderAsyncResult): ViewerFeatureStats {
+    let vertexCount = 0;
+    let faceCount = 0;
     let hasVertexColors = false;
     let morphTargetCount = 0;
     let multiMaterialCount = 0;
@@ -2049,6 +2131,11 @@ function getViewerFeatureStats(result: ISceneLoaderAsyncResult): ViewerFeatureSt
     const uvTextureSets = new Map<number, Set<string>>();
 
     for (const mesh of result.meshes) {
+        const meshVertexCount = mesh.getTotalVertices();
+        vertexCount += meshVertexCount;
+        const meshIndexCount = mesh.getTotalIndices();
+        faceCount += Math.floor((meshIndexCount > 0 ? meshIndexCount : meshVertexCount) / 3);
+
         UV_BUFFER_KINDS.forEach((kind, index) => {
             if (mesh.isVerticesDataPresent(kind)) {
                 uvMeshCounts.set(index, (uvMeshCounts.get(index) ?? 0) + 1);
@@ -2122,6 +2209,8 @@ function getViewerFeatureStats(result: ISceneLoaderAsyncResult): ViewerFeatureSt
     }
 
     return {
+        vertexCount,
+        faceCount,
         uvSets,
         normalMeshCount,
         tangentMeshCount,
@@ -2244,9 +2333,19 @@ function materialUsesAlpha(material: PBRMaterial | StandardMaterial): boolean {
 
 function buildViewerStatusRows(
     stats: ViewerFeatureStats,
-    diagnostics: ViewerFBXDiagnosticSummary
+    diagnostics: ViewerFBXDiagnosticSummary,
+    sizeStats?: ViewerAssetSizeStats
 ): ViewerStatusRow[] {
     const rows: ViewerStatusRow[] = [];
+    if (sizeStats) {
+        rows.push({ label: "Asset sizes", value: formatAssetSizeSummary(sizeStats) });
+    }
+
+    const modelGeometrySummary = formatModelGeometrySummary(stats);
+    if (modelGeometrySummary) {
+        rows.push({ label: "Model geometry", value: modelGeometrySummary });
+    }
+
     const uvSummary = formatUVSummary(stats.uvSets);
     if (uvSummary) {
         rows.push({ label: "UVs", value: uvSummary, alert: stats.uvSets.some((uvSet) => uvSet.missingMeshData) });
@@ -2287,6 +2386,33 @@ function buildViewerStatusRows(
     rows.push(...buildFBXDiagnosticRows(diagnostics));
 
     return rows;
+}
+
+function formatModelGeometrySummary(stats: ViewerFeatureStats): string {
+    if (stats.vertexCount === 0 && stats.faceCount === 0) return "";
+    return `${formatNumber(stats.vertexCount)} vertices, ${formatNumber(stats.faceCount)} faces`;
+}
+
+function formatAssetSizeSummary(stats: ViewerAssetSizeStats): string {
+    return [
+        `${stats.modelFormat} ${formatByteSize(stats.modelBytes)}`,
+        `textures ${formatByteSize(stats.textureBytes)} (${formatCount(stats.textureCount, "file")})`,
+    ].join(", ");
+}
+
+function formatByteSize(bytes: number | null): string {
+    if (bytes === null) return "unknown";
+    if (bytes < 1024) return `${bytes} B`;
+
+    const units = ["KB", "MB", "GB"];
+    let value = bytes / 1024;
+    let unitIndex = 0;
+    while (value >= 1024 && unitIndex < units.length - 1) {
+        value /= 1024;
+        unitIndex++;
+    }
+
+    return `${value.toFixed(value >= 10 ? 1 : 2)} ${units[unitIndex]}`;
 }
 
 function formatUVSummary(uvSets: ViewerUVSetStats[]): string {
@@ -2397,6 +2523,10 @@ function formatDiagnosticType(type: string): string {
 
 function formatCount(count: number, singular: string, plural = `${singular}s`): string {
     return `${count} ${count === 1 ? singular : plural}`;
+}
+
+function formatNumber(value: number): string {
+    return Math.trunc(value).toLocaleString("en-US");
 }
 
 function getViewerFBXDiagnosticSummary(arrayBuffer: ArrayBuffer): ViewerFBXDiagnosticSummary {
@@ -2551,11 +2681,71 @@ function classifyFBXDiagnostic(entry: ViewerFBXDiagnosticEntry): ViewerDiagnosti
     }
 }
 
+const assetByteSizeCache = new Map<string, Promise<number | null>>();
+
+async function getViewerAssetSizeStats(
+    result: ISceneLoaderAsyncResult,
+    manifest: ViewerPBRTextureManifest | null,
+    model: ModelEntry,
+    modelBytes: number | null
+): Promise<ViewerAssetSizeStats> {
+    const textureUrls = getLoadedAssetTextureUrls(result, manifest, model);
+    const textureBytes = await getCombinedAssetByteSize(textureUrls);
+    return {
+        modelFormat: model.format.toUpperCase(),
+        modelBytes,
+        textureBytes,
+        textureCount: textureUrls.size,
+    };
+}
+
+async function getCombinedAssetByteSize(urls: Set<string>): Promise<number | null> {
+    const sizes = await Promise.all([...urls].map((url) => getAssetByteSize(url)));
+    return sizes.every((bytes): bytes is number => bytes !== null)
+        ? sizes.reduce((total, bytes) => total + bytes, 0)
+        : null;
+}
+
+function getAssetByteSize(url: string): Promise<number | null> {
+    const existing = assetByteSizeCache.get(url);
+    if (existing) return existing;
+
+    const promise = fetchAssetByteSize(url);
+    assetByteSizeCache.set(url, promise);
+    return promise;
+}
+
+async function fetchAssetByteSize(url: string): Promise<number | null> {
+    try {
+        const headResponse = await fetch(url, { method: "HEAD" });
+        const contentLength = headResponse.headers.get("content-length");
+        const parsedLength = contentLength ? Number.parseInt(contentLength, 10) : Number.NaN;
+        if (headResponse.ok && Number.isFinite(parsedLength) && parsedLength >= 0) {
+            return parsedLength;
+        }
+
+        const response = await fetch(url);
+        if (!response.ok) return null;
+        return (await response.arrayBuffer()).byteLength;
+    } catch (error) {
+        console.warn(`Could not determine asset size for ${url}`, error);
+        return null;
+    }
+}
+
 function getLoadedAssetTextureCount(
     result: ISceneLoaderAsyncResult,
     manifest: ViewerPBRTextureManifest | null,
     model: ModelEntry
 ): number {
+    return getLoadedAssetTextureUrls(result, manifest, model).size;
+}
+
+function getLoadedAssetTextureUrls(
+    result: ISceneLoaderAsyncResult,
+    manifest: ViewerPBRTextureManifest | null,
+    model: ModelEntry
+): Set<string> {
     const textureUrls = new Set<string>();
     const knownTextureUrls = getKnownAssetTextureUrls(manifest, model);
     const folder = manifest?.folder;
@@ -2578,7 +2768,7 @@ function getLoadedAssetTextureCount(
         collectMaterialTextureUrls(mesh.material, textureUrls, folder, knownTextureUrls);
     }
 
-    return textureUrls.size;
+    return textureUrls;
 }
 
 function getKnownAssetTextureUrls(
@@ -2640,13 +2830,111 @@ function collectMaterialTextureUrls(
     }
 }
 
+function setLoadedContentRenderBlocked(blocked: boolean): void {
+    if (!camera) return;
+    camera.layerMask = blocked ? 0 : defaultCameraLayerMask;
+}
+
+async function waitForLoadedAssetReady(result: ISceneLoaderAsyncResult, timeoutMs = 15000): Promise<void> {
+    const start = performance.now();
+    let pendingTextures = getPendingActiveTextureNames(result);
+    while (pendingTextures.length > 0) {
+        if (performance.now() - start > timeoutMs) {
+            console.warn(`Timed out waiting for ${pendingTextures.length} active texture(s): ${pendingTextures.join(", ")}`);
+            return;
+        }
+
+        await new Promise((resolve) => window.setTimeout(resolve, 50));
+        pendingTextures = getPendingActiveTextureNames(result);
+    }
+}
+
+function getPendingActiveTextureNames(result: ISceneLoaderAsyncResult): string[] {
+    return getLoadedAssetActiveTextures(result)
+        .filter((texture) => !texture.isReady())
+        .map((texture) => texture.name || texture.url || "(unnamed texture)");
+}
+
+function getLoadedAssetActiveTextures(result: ISceneLoaderAsyncResult): BaseTexture[] {
+    const textures = new Set<BaseTexture>();
+    for (const mesh of result.meshes) {
+        collectMaterialActiveTextures(mesh.material, textures);
+    }
+    return [...textures];
+}
+
+function getLoadedPBRMaterials(result: ISceneLoaderAsyncResult): PBRMaterial[] {
+    return getLoadedAssetMaterials(result).filter((material): material is PBRMaterial => material instanceof PBRMaterial);
+}
+
+function getLoadedStandardMaterials(result: ISceneLoaderAsyncResult): StandardMaterial[] {
+    return getLoadedAssetMaterials(result).filter((material): material is StandardMaterial => material instanceof StandardMaterial);
+}
+
+function getLoadedAssetMaterials(result: ISceneLoaderAsyncResult): Array<PBRMaterial | StandardMaterial | MultiMaterial> {
+    const materials = new Set<PBRMaterial | StandardMaterial | MultiMaterial>();
+    for (const mesh of result.meshes) {
+        collectLoadedAssetMaterials(mesh.material, materials);
+    }
+    return [...materials];
+}
+
+function collectLoadedAssetMaterials(
+    material: unknown,
+    materials: Set<PBRMaterial | StandardMaterial | MultiMaterial>
+): void {
+    if (!material) return;
+
+    if (material instanceof MultiMaterial) {
+        materials.add(material);
+        for (const subMaterial of material.subMaterials) {
+            collectLoadedAssetMaterials(subMaterial, materials);
+        }
+        return;
+    }
+
+    if (material instanceof PBRMaterial || material instanceof StandardMaterial) {
+        materials.add(material);
+    }
+}
+
+function collectMaterialActiveTextures(material: unknown, textures: Set<BaseTexture>): void {
+    if (!material) return;
+
+    if (material instanceof MultiMaterial) {
+        for (const subMaterial of material.subMaterials) {
+            collectMaterialActiveTextures(subMaterial, textures);
+        }
+        return;
+    }
+
+    if (!(material instanceof PBRMaterial) && !(material instanceof StandardMaterial)) {
+        return;
+    }
+
+    for (const texture of material.getActiveTextures()) {
+        textures.add(texture);
+    }
+}
+
 async function loadModel(index: number) {
+    const loadId = ++activeLoadId;
     const model = models[index];
     setStatusMessage(`Loading ${model.name}...`);
     let pbrTextureCount = 0;
     let assetTextureCount = 0;
+    let modelSourceBytes: number | null = null;
     let fbxDiagnostics = createViewerFBXDiagnosticSummary([]);
+    let loadedResult: ISceneLoaderAsyncResult | null = null;
 
+    const isActiveLoad = () => loadId === activeLoadId;
+    const discardStaleLoad = () => {
+        if (loadedResult && loadedResult !== currentResult) {
+            disposeImportedResult(loadedResult);
+        }
+    };
+
+    setLoadedContentRenderBlocked(true);
     disposeCurrentModel();
 
     try {
@@ -2654,72 +2942,91 @@ async function loadModel(index: number) {
 
         if (model.format === "glb") {
             // Use Babylon's built-in GLTF/GLB loader
-            currentResult = await SceneLoader.ImportMeshAsync(
+            loadedResult = await SceneLoader.ImportMeshAsync(
                 "",
                 "",
                 model.url,
                 scene
             );
+            if (!isActiveLoad()) {
+                discardStaleLoad();
+                return;
+            }
+            currentResult = loadedResult;
+            modelSourceBytes = await getAssetByteSize(model.url);
+            if (!isActiveLoad()) {
+                discardStaleLoad();
+                return;
+            }
 
             // Trim dead leading/trailing frames from GLB animations
             // (this asset has extra frames that cause a pause before looping)
-            trimAnimationGroups(currentResult.animationGroups);
+            trimAnimationGroups(loadedResult.animationGroups);
         } else {
             // Use our custom FBX loader
             const response = await fetch(model.url);
+            if (!isActiveLoad()) return;
             const arrayBuffer = await response.arrayBuffer();
+            if (!isActiveLoad()) return;
+            modelSourceBytes = arrayBuffer.byteLength;
             fbxDiagnostics = getViewerFBXDiagnosticSummary(arrayBuffer);
 
             const rootUrl = model.url.substring(0, model.url.lastIndexOf("/") + 1);
 
             const loader = new FBXFileLoader();
-            currentResult = await loader.importMeshAsync(
+            loadedResult = await loader.importMeshAsync(
                 null,
                 scene,
                 arrayBuffer,
                 rootUrl
             );
-            applyVertexColorUseOverride(currentResult, model.disableVertexColors ?? false);
+            if (!isActiveLoad()) {
+                discardStaleLoad();
+                return;
+            }
+            currentResult = loadedResult;
+            applyVertexColorUseOverride(loadedResult, model.disableVertexColors ?? false);
 
             manifest = getViewerPBRManifest(model);
             pbrTextureCount = applyViewerPBRMaterials(
-                currentResult,
+                loadedResult,
                 manifest,
                 model.forceOpaque ?? false,
                 model.pbrMaterialTextureAliases ?? []
             );
             pbrTextureCount += applyPBRTextureOverrides(
+                loadedResult,
                 model.textures,
                 model.forceOpaque ?? false
             );
-            await applyPBRMaterialOverrides(model.pbrMaterialOverrides ?? [], model.forceOpaque ?? false);
-            applyLineArtSiblingAlbedo(currentResult, model.lineArtAlbedoOverrides ?? []);
+            await applyPBRMaterialOverrides(loadedResult, model.pbrMaterialOverrides ?? [], model.forceOpaque ?? false);
+            if (!isActiveLoad()) {
+                discardStaleLoad();
+                return;
+            }
+            applyLineArtSiblingAlbedo(loadedResult, model.lineArtAlbedoOverrides ?? []);
             preloadViewerTextures(model.preloadTextures);
-            assetTextureCount = getLoadedAssetTextureCount(currentResult, manifest, model);
+            assetTextureCount = getLoadedAssetTextureCount(loadedResult, manifest, model);
 
             if (pbrTextureCount === 0) {
                 // Fallback for any hand-authored entries that do not have sibling texture assets.
-                for (const mat of scene.materials) {
-                    if (mat instanceof StandardMaterial) {
-                        applyTextures(mat, model.textures);
-                    }
+                for (const mat of getLoadedStandardMaterials(loadedResult)) {
+                    applyTextures(mat, model.textures);
                 }
             }
 
             // Force opaque materials for models with z-fighting issues
             if (model.forceOpaque) {
-                for (const mat of scene.materials) {
-                    if (mat instanceof StandardMaterial) {
-                        mat.transparencyMode = 0; // OPAQUE
-                        mat.alpha = 1;
-                        mat.opacityTexture = null;
-                    }
+                for (const mat of getLoadedStandardMaterials(loadedResult)) {
+                    mat.transparencyMode = 0; // OPAQUE
+                    mat.alpha = 1;
+                    mat.opacityTexture = null;
                 }
             }
         }
 
         const frame = normalizeLoadedAsset(
-            currentResult,
+            loadedResult,
             manifest,
             model.viewerRotationYDegrees,
             model.viewerCameraRadiusMultiplier,
@@ -2731,28 +3038,42 @@ async function loadModel(index: number) {
         camera.maxZ = frame.camera.maxZ;
         camera.alpha = 2.105;   // ~120° azimuth
         camera.beta = 1.080;    // ~62° elevation (above horizon)
+        await waitForLoadedAssetReady(loadedResult);
+        if (!isActiveLoad()) {
+            discardStaleLoad();
+            return;
+        }
 
-        const meshCount = currentResult.meshes.length;
-        const skelCount = currentResult.skeletons.length;
-        const animCount = currentResult.animationGroups.length;
+        const meshCount = loadedResult.meshes.length;
+        const skelCount = loadedResult.skeletons.length;
+        const animCount = loadedResult.animationGroups.length;
+        const sizeStats = await getViewerAssetSizeStats(loadedResult, manifest, model, modelSourceBytes);
+        if (!isActiveLoad()) {
+            discardStaleLoad();
+            return;
+        }
 
         const loadedParts = [formatCount(meshCount, "mesh", "meshes")];
         if (skelCount > 0) loadedParts.push(formatCount(skelCount, "skeleton"));
         if (animCount > 0) loadedParts.push(formatCount(animCount, "animation"));
         if (assetTextureCount > 0) loadedParts.push(formatCount(assetTextureCount, "asset texture"));
-        const featureStats = getViewerFeatureStats(currentResult);
+        const featureStats = getViewerFeatureStats(loadedResult);
         setStatusDetails(
             `Loaded: ${loadedParts.join(", ")}`,
-            buildViewerStatusRows(featureStats, fbxDiagnostics)
+            buildViewerStatusRows(featureStats, fbxDiagnostics, sizeStats)
         );
 
         // Update animation UI
-        updateAnimationUI(currentResult.animationGroups.length > 0
-            ? currentResult.animationGroups
+        updateAnimationUI(loadedResult.animationGroups.length > 0
+            ? loadedResult.animationGroups
             : [], model.defaultAnimation);
+        setLoadedContentRenderBlocked(false);
     } catch (err: any) {
-        setStatusMessage(`Error: ${err.message}`);
-        console.error(err);
+        if (isActiveLoad()) {
+            setStatusMessage(`Error: ${err.message}`);
+            console.error(err);
+            setLoadedContentRenderBlocked(false);
+        }
     }
 }
 
@@ -2791,14 +3112,13 @@ function applyTextures(
 }
 
 function applyPBRTextureOverrides(
+    result: ISceneLoaderAsyncResult,
     textures: ViewerTextureOverride[],
     forceOpaque: boolean
 ): number {
     let appliedCount = 0;
 
-    for (const mat of scene.materials) {
-        if (!(mat instanceof PBRMaterial)) continue;
-
+    for (const mat of getLoadedPBRMaterials(result)) {
         for (const tex of textures) {
             if (tex.materialName && !matchesPBRMaterialOverride(mat.name, tex.materialName)) {
                 continue;
@@ -2909,14 +3229,13 @@ function pbrMaterialHasTextureForSlot(material: PBRMaterial, slot: string): bool
 }
 
 async function applyPBRMaterialOverrides(
+    result: ISceneLoaderAsyncResult,
     overrides: ViewerPBRMaterialOverride[],
     forceOpaque: boolean
 ) {
     if (overrides.length === 0) return;
 
-    for (const mat of scene.materials) {
-        if (!(mat instanceof PBRMaterial)) continue;
-
+    for (const mat of getLoadedPBRMaterials(result)) {
         for (const override of overrides) {
             if (!matchesPBRMaterialOverride(mat.name, override.materialName)) {
                 continue;
@@ -3278,6 +3597,26 @@ function applyPBRClearCoatOverride(material: PBRMaterial, override: ViewerPBRCle
 function applyPBRSubSurfaceOverride(material: PBRMaterial, override: ViewerPBRSubSurfaceOverride): void {
     const subSurface = material.subSurface;
 
+    if (override.minimumThickness !== undefined) {
+        subSurface.minimumThickness = override.minimumThickness;
+    }
+
+    if (override.maximumThickness !== undefined) {
+        subSurface.maximumThickness = override.maximumThickness;
+    }
+
+    if (override.useGltfStyleTextures !== undefined) {
+        subSurface.useGltfStyleTextures = override.useGltfStyleTextures;
+    }
+
+    if (override.useThicknessAsDepth !== undefined) {
+        subSurface.useThicknessAsDepth = override.useThicknessAsDepth;
+    }
+
+    if (override.isScatteringEnabled !== undefined) {
+        subSurface.isScatteringEnabled = override.isScatteringEnabled;
+    }
+
     if (override.isRefractionEnabled !== undefined) {
         subSurface.isRefractionEnabled = override.isRefractionEnabled;
     }
@@ -3286,8 +3625,32 @@ function applyPBRSubSurfaceOverride(material: PBRMaterial, override: ViewerPBRSu
         subSurface.refractionIntensity = override.refractionIntensity;
     }
 
+    if (override.volumeIndexOfRefraction !== undefined) {
+        subSurface.volumeIndexOfRefraction = override.volumeIndexOfRefraction;
+    }
+
+    if (override.tintColorAtDistance !== undefined) {
+        subSurface.tintColorAtDistance = override.tintColorAtDistance;
+    }
+
+    if (override.linkRefractionWithTransparency !== undefined) {
+        subSurface.linkRefractionWithTransparency = override.linkRefractionWithTransparency;
+    }
+
     if (override.useAlbedoToTintRefraction !== undefined) {
         subSurface.useAlbedoToTintRefraction = override.useAlbedoToTintRefraction;
+    }
+
+    if (override.isTranslucencyEnabled !== undefined) {
+        subSurface.isTranslucencyEnabled = override.isTranslucencyEnabled;
+    }
+
+    if (override.translucencyIntensity !== undefined) {
+        subSurface.translucencyIntensity = override.translucencyIntensity;
+    }
+
+    if (override.useAlbedoToTintTranslucency !== undefined) {
+        subSurface.useAlbedoToTintTranslucency = override.useAlbedoToTintTranslucency;
     }
 }
 

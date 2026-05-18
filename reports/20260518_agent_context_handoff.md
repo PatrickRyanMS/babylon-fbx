@@ -129,6 +129,9 @@ Known viewer-specific lessons:
 - Some Sketchfab-style black duplicate outline shells are intentional outline geometry and should use `backFaceCulling = true`, not be hidden.
 - Viewer ORM packing must treat roughness/metallic/AO as data textures and avoid browser color-space conversion.
 - Manual texture/material overrides are acceptable in the viewer when source FBX files omit connections or have asset-specific authoring quirks.
+- The viewer blocks rendering during model switches by setting the active camera layer mask to `0`, not by disabling meshes. This keeps mesh bounds computable for camera framing, waits for active textures, then restores the original camera layer mask. A load-token guard prevents stale async loads from unblocking or replacing a newer model.
+- Viewer dropdown format labels are automatic for FBX/GLB pairs, but animation labels are intentionally not shown because the viewer does not preload every model to know animation presence up front.
+- The viewer stats pane now includes model/texture byte sizes plus total vertex and face counts to help correlate parse/load time with fixture complexity.
 
 ## Known open or fragile areas
 
@@ -189,6 +192,8 @@ Root cause update for the Cloud Station tail pop: the GLB reference samplers are
 Post-fix user validation: the user checked through most animated meshes and did not see regressions. The measured Cloud Station middle-fish `EVSB_FISH1:body_02_JNT` local rotation delta dropped from the previous multi-degree pop to approximately `0.016` degrees per sampled step, with no absolute jump detected in that check.
 
 Root cause update for the Cloud Station shiny/wiggly fish bands: the artifact is lighting/material response, not generated tangents or malformed normals. Toggling the fish material unlit removes the bands, and the GLB reference uses `KHR_materials_unlit` for the fish. Runtime Lambert materials now use diffuse-only `StandardMaterial` specular black, the viewer maps zero-specular StandardMaterials to roughness 1 during PBR conversion, and Cloud Station fish viewer overrides set the three fish PBR materials to `unlit` for GLB visual parity.
+
+Viewer texture/status update: Chernovan Nemesis needed viewer-only texture overrides for folder assets that were not connected by name (`HullInside_2_*`, `Instruments.png`, and `Wheels.png`). Chernovan `Glass_PBR` also uses a viewer-only subsurface/translucency override with alpha `0.5` for Sketchfab-style glass parity. WW1 Plane viewer overrides target `pasted__lambert2` to `RGB.jpeg`, clear the broken `Blur_effect` opacity texture, and set `Tooner` to back-face culling. The viewer clear color is `#212121`.
 
 ## Useful existing reports
 
