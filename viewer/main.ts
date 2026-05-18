@@ -54,6 +54,43 @@ interface ViewerPBRMaterialOverride {
     transparencyMode?: "opaque" | "alphaTest" | "alphaBlend";
     metallic?: number;
     roughness?: number;
+    alpha?: number;
+    alphaCutOff?: number;
+    clearOpacityTexture?: boolean;
+    backFaceCulling?: boolean;
+    forceIrradianceInFragment?: boolean;
+    invertNormalMapX?: boolean;
+    invertNormalMapY?: boolean;
+    clearCoat?: ViewerPBRClearCoatOverride;
+    subSurface?: ViewerPBRSubSurfaceOverride;
+}
+
+interface ViewerPBRClearCoatOverride {
+    isEnabled?: boolean;
+    intensity?: number;
+    roughness?: number;
+    texturePath?: string;
+    textureRoughnessPath?: string;
+    bumpTexturePath?: string;
+    bumpTextureLevel?: number;
+    bumpTextureScale?: number;
+}
+
+interface ViewerPBRSubSurfaceOverride {
+    isRefractionEnabled?: boolean;
+    refractionIntensity?: number;
+    useAlbedoToTintRefraction?: boolean;
+}
+
+interface ViewerPBRMaterialTextureAlias {
+    materialName: string;
+    textureMaterialKey: string;
+}
+
+interface ViewerLineArtAlbedoOverride {
+    materialName: string;
+    siblingAlbedoTexture: string;
+    albedoTexturePath: string;
 }
 
 interface ViewerTextureOverride {
@@ -62,6 +99,7 @@ interface ViewerTextureOverride {
     materialName?: string;
     coordinatesIndex?: number;
     useAlphaFromRGB?: boolean;
+    addressMode?: "clamp";
 }
 
 interface ViewerTextureOverrideSource {
@@ -70,13 +108,23 @@ interface ViewerTextureOverrideSource {
     materialName?: string;
     coordinatesIndex?: number;
     useAlphaFromRGB?: boolean;
+    addressMode?: "clamp";
+}
+
+interface ViewerTexturePreload {
+    path: string;
+    url: string;
 }
 
 interface ViewerModelOverride {
     name?: string;
     textures?: ViewerTextureOverrideSource[];
+    preloadTextures?: string[];
     pbrMaterialOverrides?: ViewerPBRMaterialOverride[];
+    pbrMaterialTextureAliases?: ViewerPBRMaterialTextureAlias[];
+    lineArtAlbedoOverrides?: ViewerLineArtAlbedoOverride[];
     defaultAnimation?: string;
+    disableVertexColors?: boolean;
     forceOpaque?: boolean;
     viewerRotationYDegrees?: number;
 }
@@ -89,10 +137,15 @@ interface ModelEntry {
     format: "fbx" | "glb";
     /** Legacy manual texture overrides; FBX models now use the viewer-only PBR manifest path. */
     textures: ViewerTextureOverride[];
+    preloadTextures: ViewerTexturePreload[];
     /** Viewer-only PBR material fixes for assets that need manual flags beyond texture inference. */
     pbrMaterialOverrides?: ViewerPBRMaterialOverride[];
+    pbrMaterialTextureAliases?: ViewerPBRMaterialTextureAlias[];
+    lineArtAlbedoOverrides?: ViewerLineArtAlbedoOverride[];
     /** Name of the animation clip to auto-play on load (defaults to first clip) */
     defaultAnimation?: string;
+    /** Viewer-only switch to ignore imported vertex color data for assets where textures should drive color. */
+    disableVertexColors?: boolean;
     /** Force all materials to opaque (fixes z-fighting from erroneous transparency) */
     forceOpaque?: boolean;
     /** Viewer-only root yaw adjustment, in degrees. */
@@ -143,8 +196,16 @@ const modelOverrides: Record<string, ViewerModelOverride> = {
         name: "Behemot Cat",
         textures: [
             { slot: "diffuse", path: "behemot-cat/Cat_BC.png" },
-            { slot: "opacity", path: "behemot-cat/Cat_Opacity.png" },
         ],
+        preloadTextures: ["behemot-cat/Cat_Opacity.png"],
+        pbrMaterialOverrides: [
+            { materialName: "Cat_Material", clearOpacityTexture: true, transparencyMode: "opaque", backFaceCulling: true },
+        ],
+        viewerRotationYDegrees: -30,
+    },
+    "tamagotchi-pet-sailor-moon/lp_01.fbx": {
+        name: "Tamagotchi Pet Sailor Moon",
+        viewerRotationYDegrees: 120,
     },
     "phoenix-bird/fly.fbx": {
         name: "Phoenix Bird (FBX, animated)",
@@ -172,6 +233,67 @@ const modelOverrides: Record<string, ViewerModelOverride> = {
             },
         ],
     },
+    "stylized-mushrooms/mushroms_2.fbx": {
+        name: "Stylized Mushrooms",
+        textures: [
+            { slot: "diffuse", path: "stylized-mushrooms/mushroms_Base_color_1001.png", materialName: "mushroms" },
+            { slot: "emissive", path: "stylized-mushrooms/mushroms_Emissive_1001.png", materialName: "mushroms" },
+            { slot: "diffuse", path: "stylized-mushrooms/mushroms_Base_color_1002.png", materialName: "ground" },
+            { slot: "emissive", path: "stylized-mushrooms/mushroms_Emissive_1002.png", materialName: "ground" },
+            { slot: "opacity", path: "stylized-mushrooms/mushroms_Opacity_1002.png", materialName: "ground", useAlphaFromRGB: true },
+        ],
+        pbrMaterialOverrides: [
+            {
+                materialName: "ground",
+                transparencyMode: "alphaTest",
+            },
+        ],
+    },
+    "stylized-mangrove-greenhouse/Mangrove Greenhouse.fbx": {
+        name: "Stylized Mangrove Greenhouse",
+        textures: [
+            { slot: "diffuse", path: "stylized-mangrove-greenhouse/Texture1_albedo.png", materialName: "TT_checker_1" },
+            { slot: "diffuse", path: "stylized-mangrove-greenhouse/Texture2_albedo.png", materialName: "TT_checker_2" },
+            { slot: "diffuse", path: "stylized-mangrove-greenhouse/Texture3_albedo.png", materialName: "TT_checker_3" },
+            { slot: "diffuse", path: "stylized-mangrove-greenhouse/Texture4_albedo.png", materialName: "TT_checker_4" },
+            { slot: "diffuse", path: "stylized-mangrove-greenhouse/Glass_albedo.png", materialName: "Glass" },
+            { slot: "opacity", path: "stylized-mangrove-greenhouse/Glass_opacity.png", materialName: "Glass", useAlphaFromRGB: true },
+            { slot: "diffuse", path: "stylized-mangrove-greenhouse/Glow_albedo.png", materialName: "Glow" },
+            { slot: "emissive", path: "stylized-mangrove-greenhouse/Glow_albedo.png", materialName: "Glow" },
+            { slot: "opacity", path: "stylized-mangrove-greenhouse/Glow_opacity.png", materialName: "Glow", useAlphaFromRGB: true },
+            { slot: "diffuse", path: "stylized-mangrove-greenhouse/Grass_albedo.png", materialName: "Grass" },
+            { slot: "diffuse", path: "stylized-mangrove-greenhouse/Leaves_albedo.png", materialName: "Leaves 1" },
+            { slot: "diffuse", path: "stylized-mangrove-greenhouse/Leaves2_albedo.png", materialName: "Leaves 2" },
+            { slot: "diffuse", path: "stylized-mangrove-greenhouse/Leaves3_albedo.png", materialName: "Leaves 3" },
+            { slot: "diffuse", path: "stylized-mangrove-greenhouse/Leaves4_albedo.png", materialName: "Leaves 4" },
+            { slot: "diffuse", path: "stylized-mangrove-greenhouse/Leaves Drop_albedo.png", materialName: "Leaves  drop" },
+            { slot: "diffuse", path: "stylized-mangrove-greenhouse/Leave_flower_albedo.png", materialName: "Material.003" },
+            { slot: "diffuse", path: "stylized-mangrove-greenhouse/Leave_palm_albedo.png", materialName: "Material.004" },
+            { slot: "diffuse", path: "stylized-mangrove-greenhouse/Leave_palm_albedo.png", materialName: "Material.028" },
+        ],
+        pbrMaterialOverrides: [
+            { materialName: "Glass", transparencyMode: "alphaBlend" },
+            { materialName: "Glow", useAdditiveAlpha: true },
+            { materialName: "Grass", albedoTextureHasAlpha: true, useAlphaFromAlbedoTexture: true, transparencyMode: "alphaTest" },
+            { materialName: "Leaves 1", albedoTextureHasAlpha: true, useAlphaFromAlbedoTexture: true, transparencyMode: "alphaTest" },
+            { materialName: "Leaves 2", albedoTextureHasAlpha: true, useAlphaFromAlbedoTexture: true, transparencyMode: "alphaTest" },
+            { materialName: "Leaves 3", albedoTextureHasAlpha: true, useAlphaFromAlbedoTexture: true, transparencyMode: "alphaTest" },
+            { materialName: "Leaves 4", albedoTextureHasAlpha: true, useAlphaFromAlbedoTexture: true, transparencyMode: "alphaTest" },
+            { materialName: "Leaves  drop", albedoTextureHasAlpha: true, useAlphaFromAlbedoTexture: true, transparencyMode: "alphaTest" },
+        ],
+        lineArtAlbedoOverrides: [
+            {
+                materialName: "Line art Green _VertexColor",
+                siblingAlbedoTexture: "Texture2_albedo.png",
+                albedoTexturePath: "stylized-mangrove-greenhouse/Texture3_albedo.png",
+            },
+            {
+                materialName: "Line art",
+                siblingAlbedoTexture: "Texture3_albedo.png",
+                albedoTexturePath: "stylized-mangrove-greenhouse/Texture2_albedo.png",
+            },
+        ],
+    },
     "hover-bike-the-rocket/TheRocketAnimation.fbx": {
         name: "Hover Bike (animated)",
         textures: [
@@ -194,6 +316,118 @@ const modelOverrides: Record<string, ViewerModelOverride> = {
             },
         ],
         viewerRotationYDegrees: 180,
+    },
+    "vino/SM_Vino.fbx": {
+        name: "Vino",
+        disableVertexColors: true,
+        textures: [
+            { slot: "diffuse", path: "vino/Main Body_Pattern_D.jpg", materialName: "Main Body" },
+            { slot: "normal", path: "vino/Main Body_Pattern_N.jpg", materialName: "Main Body" },
+            { slot: "ambientOcclusion", path: "vino/MainParts_AO.png", materialName: "Main Body" },
+            { slot: "roughness", path: "vino/Main Body_Pattern_R.jpg", materialName: "Main Body" },
+            { slot: "metallic", path: "vino/Main Body_Pattern_M.jpg", materialName: "Main Body" },
+
+            { slot: "diffuse", path: "vino/SmlParts_D.jpg", materialName: "SmallParts" },
+            { slot: "normal", path: "vino/SmlParts_N.jpg", materialName: "SmallParts" },
+            { slot: "ambientOcclusion", path: "vino/SmlParts_AO.jpeg", materialName: "SmallParts" },
+            { slot: "roughness", path: "vino/SmlParts_R.jpg", materialName: "SmallParts" },
+            { slot: "metallic", path: "vino/SmlParts_M.jpg", materialName: "SmallParts" },
+
+            { slot: "diffuse", path: "vino/Lamp&Glass_D.jpg", materialName: "Lamp & Glass" },
+            { slot: "normal", path: "vino/Lamp&Glass_N.jpg", materialName: "Lamp & Glass" },
+            { slot: "roughness", path: "vino/Lamp&Glass_R.jpg", materialName: "Lamp & Glass" },
+            { slot: "metallic", path: "vino/Lamp&Glass_M.jpg", materialName: "Lamp & Glass" },
+
+            { slot: "diffuse", path: "vino/Lamp&Glass_D.jpg", materialName: "Glass" },
+            { slot: "normal", path: "vino/Lamp&Glass_N.jpg", materialName: "Glass" },
+            { slot: "roughness", path: "vino/Lamp&Glass_R.jpg", materialName: "Glass" },
+            { slot: "metallic", path: "vino/Lamp&Glass_M.jpg", materialName: "Glass" },
+
+            { slot: "diffuse", path: "vino/Tire_D.jpg", materialName: "Tire" },
+            { slot: "normal", path: "vino/Tire_N.jpeg", materialName: "Tire" },
+            { slot: "ambientOcclusion", path: "vino/Tire_AO.jpg", materialName: "Tire" },
+            { slot: "roughness", path: "vino/Tire_R.jpg", materialName: "Tire" },
+            { slot: "metallic", path: "vino/Tire_M.jpg", materialName: "Tire" },
+
+            { slot: "diffuse", path: "vino/Sticker_D.jpg", materialName: "Sticker" },
+            { slot: "normal", path: "vino/Sticker_N.jpg", materialName: "Sticker" },
+            { slot: "roughness", path: "vino/Sticker_R.jpg", materialName: "Sticker" },
+            { slot: "opacity", path: "vino/Sticker_A.png", materialName: "Sticker", addressMode: "clamp" },
+        ],
+        pbrMaterialOverrides: [
+            {
+                materialName: "Main Body",
+                transparencyMode: "opaque",
+                forceIrradianceInFragment: true,
+                invertNormalMapX: true,
+                clearOpacityTexture: true,
+                backFaceCulling: true,
+                clearCoat: {
+                    isEnabled: true,
+                    intensity: 1,
+                    roughness: 1,
+                    texturePath: "vino/Main Body_Pattern_CoatMsk.jpg",
+                    textureRoughnessPath: "vino/Main Body_Pattern_CoatR.jpg",
+                    bumpTexturePath: "vino/flakes.png",
+                    bumpTextureLevel: 0.2143837519721915,
+                    bumpTextureScale: 50,
+                },
+            },
+            {
+                materialName: "SmallParts",
+                forceIrradianceInFragment: true,
+                invertNormalMapX: true,
+                backFaceCulling: true,
+            },
+            {
+                materialName: "Lamp & Glass",
+                transparencyMode: "opaque",
+                clearOpacityTexture: true,
+                forceIrradianceInFragment: true,
+                invertNormalMapX: true,
+                backFaceCulling: false,
+            },
+            {
+                materialName: "Glass",
+                transparencyMode: "alphaBlend",
+                alpha: 0.25,
+                clearOpacityTexture: true,
+                forceIrradianceInFragment: true,
+                invertNormalMapX: true,
+                backFaceCulling: true,
+                subSurface: {
+                    isRefractionEnabled: true,
+                    refractionIntensity: 0.9930598111760697,
+                    useAlbedoToTintRefraction: true,
+                },
+            },
+            {
+                materialName: "Tire",
+                forceIrradianceInFragment: true,
+                invertNormalMapX: true,
+                backFaceCulling: true,
+            },
+            {
+                materialName: "Sticker",
+                transparencyMode: "alphaTest",
+                alphaCutOff: 0.15337093928152645,
+                metallic: 0,
+                forceIrradianceInFragment: true,
+                invertNormalMapX: true,
+                backFaceCulling: true,
+            },
+        ],
+        pbrMaterialTextureAliases: [
+            { materialName: "Main Body", textureMaterialKey: "main_body_pattern" },
+            { materialName: "SmallParts", textureMaterialKey: "smlparts" },
+            { materialName: "Lamp & Glass", textureMaterialKey: "lamp_glass" },
+            { materialName: "Glass", textureMaterialKey: "lamp_glass" },
+            { materialName: "Tire", textureMaterialKey: "tire" },
+            { materialName: "Sticker", textureMaterialKey: "sticker" },
+        ],
+    },
+    "vino/vino.glb": {
+        name: "Vino (GLB reference)",
     },
     "40min-draft-jet-car-vertex-color/Car.fbx": {
         name: "Jet Car (vertex colors)",
@@ -265,9 +499,29 @@ const modelOverrides: Record<string, ViewerModelOverride> = {
     },
     "the-last-stronghold-animated/Floating_Gate_Chinese1.fbx": {
         name: "The Last Stronghold (animated)",
+        textures: [
+            { slot: "diffuse", path: "the-last-stronghold-animated/sky-yellow-e.jpg", materialName: "sky_sketchfab" },
+            { slot: "diffuse", path: "the-last-stronghold-animated/baked-gate_LOW_denoise.jpg", materialName: "final_gate_low" },
+            { slot: "diffuse", path: "the-last-stronghold-animated/baked_full_alfa_denoise.jpg", materialName: "final_alfa" },
+            { slot: "diffuse", path: "the-last-stronghold-animated/baked_gate_Top_denoise.jpg", materialName: "final_gate_top" },
+            { slot: "diffuse", path: "the-last-stronghold-animated/baked_merged_C_denoise.jpg", materialName: "final_C" },
+            { slot: "diffuse", path: "the-last-stronghold-animated/bake_island_B_denoise.jpg", materialName: "final_B" },
+            { slot: "diffuse", path: "the-last-stronghold-animated/bake_somt_denoise.jpg", materialName: "final_SOMT" },
+            { slot: "diffuse", path: "the-last-stronghold-animated/baked_island_E_denoise.jpg", materialName: "final_E" },
+            { slot: "diffuse", path: "the-last-stronghold-animated/bake_islands_A_denoise.jpg", materialName: "final_A" },
+            { slot: "diffuse", path: "the-last-stronghold-animated/ropes_denoise.jpg", materialName: "final_rope" },
+        ],
+        pbrMaterialOverrides: [
+            { materialName: "sky_sketchfab", backFaceCulling: true },
+        ],
     },
     "spartan-armour-mkv-halo-reach/Spartan_Sketchfab.fbx": {
         name: "Spartan Armor (FBX)",
+        pbrMaterialTextureAliases: [
+            { materialName: "Spartan_Shoulders_Mat", textureMaterialKey: "odst_shoulder_mat" },
+            { materialName: "Spartan_Ear_Mat", textureMaterialKey: "spartan_ears_mat" },
+            { materialName: "lambert2", textureMaterialKey: "lambert1" },
+        ],
     },
     "spartan-armour-mkv-halo-reach/spartan_armour_mkv_-_halo_reach.glb": {
         name: "Spartan Armor (GLB reference)",
@@ -289,8 +543,12 @@ function buildModelCatalog(): ModelEntry[] {
                 url: assetUrl(path),
                 format: inferModelFormat(path),
                 textures: resolveTextureOverrides(override.textures),
+                preloadTextures: resolveTexturePreloads(override.preloadTextures),
                 pbrMaterialOverrides: override.pbrMaterialOverrides,
+                pbrMaterialTextureAliases: override.pbrMaterialTextureAliases,
+                lineArtAlbedoOverrides: override.lineArtAlbedoOverrides,
                 defaultAnimation: override.defaultAnimation,
+                disableVertexColors: override.disableVertexColors,
                 forceOpaque: override.forceOpaque,
                 viewerRotationYDegrees: override.viewerRotationYDegrees,
             };
@@ -310,8 +568,36 @@ function resolveTextureOverrides(textures: ViewerTextureOverrideSource[] = []): 
             materialName: texture.materialName,
             coordinatesIndex: texture.coordinatesIndex,
             useAlphaFromRGB: texture.useAlphaFromRGB,
+            addressMode: texture.addressMode,
         }];
     });
+}
+
+function resolveTexturePreloads(paths: string[] = []): ViewerTexturePreload[] {
+    return paths.flatMap((path) => {
+        const url = assetUrls[`../tests/models/${path}`];
+        if (!url) {
+            console.warn(`Missing viewer texture preload: ${path}`);
+            return [];
+        }
+        return [{ path, url }];
+    });
+}
+
+function preloadViewerTextures(textures: ViewerTexturePreload[]): void {
+    for (const preload of textures) {
+        const fileName = getFileName(preload.path);
+        const alreadyLoaded = scene.textures.some((texture) =>
+            texture.name === fileName ||
+            texture.url === preload.url ||
+            getFileName((texture.url ?? "").replace(/\\/g, "/")) === fileName
+        );
+        if (alreadyLoaded) continue;
+
+        const texture = new Texture(preload.url, scene);
+        texture.name = fileName;
+        texture.gammaSpace = false;
+    }
 }
 
 function isModelPath(path: string): boolean {
@@ -357,6 +643,7 @@ interface ViewerPBRTextureEntry {
     materialKey: string;
     slot: ViewerPBRTextureSlot;
     coordinatesIndex?: number;
+    addressMode?: "clamp";
 }
 
 interface ViewerPBRTextureManifest {
@@ -386,6 +673,10 @@ function getAssetRelativePath(url: string): string | undefined {
     return match?.[0].replace("../tests/models/", "");
 }
 
+function getViewerTextureAddressMode(path: string): "clamp" | undefined {
+    return path === "vino/Sticker_A.png" ? "clamp" : undefined;
+}
+
 function getViewerPBRManifest(model: ModelEntry): ViewerPBRTextureManifest | null {
     const fbxPath = getAssetRelativePath(model.url);
     return fbxPath ? viewerPBRManifests[fbxPath] ?? null : null;
@@ -413,6 +704,7 @@ function buildViewerPBRManifests(): Record<string, ViewerPBRTextureManifest> {
                         fileName,
                         materialKey: inferMaterialKey(fileName),
                         slot: inferTextureSlot(fileName),
+                        addressMode: getViewerTextureAddressMode(path),
                     };
                 }),
         };
@@ -698,7 +990,8 @@ function disposeCurrentModel() {
 function applyViewerPBRMaterials(
     result: ISceneLoaderAsyncResult,
     manifest: ViewerPBRTextureManifest | null,
-    forceOpaque: boolean
+    forceOpaque: boolean,
+    materialTextureAliases: ViewerPBRMaterialTextureAlias[] = []
 ): number {
     const convertedMaterials = new Map<unknown, unknown>();
     const allowGlobalTextureFallback = countLeafMaterials(result) <= 1;
@@ -725,7 +1018,13 @@ function applyViewerPBRMaterials(
         }
 
         const textureEntries = manifest
-            ? selectTextureEntriesForMaterial(materialName(material), manifest, material, allowGlobalTextureFallback)
+            ? selectTextureEntriesForMaterial(
+                materialName(material),
+                manifest,
+                material,
+                allowGlobalTextureFallback,
+                materialTextureAliases
+            )
             : [];
         const conversion = createViewerPBRMaterial(material, textureEntries, forceOpaque);
         assignedTextureCount += conversion.textureCount;
@@ -946,6 +1245,7 @@ function createViewerPBRTexture(entry: ViewerPBRTextureEntry): Texture {
     if (entry.coordinatesIndex !== undefined) {
         texture.coordinatesIndex = entry.coordinatesIndex;
     }
+    applyViewerTextureAddressMode(texture, entry.addressMode);
     if (entry.slot === "opacity") {
         configureOpacityTexture(texture, entry.fileName);
     }
@@ -958,6 +1258,12 @@ function configureOpacityTexture<T extends BaseTexture>(texture: T, sourceName =
     return texture;
 }
 
+function applyViewerTextureAddressMode(texture: Texture, addressMode: "clamp" | undefined): void {
+    if (addressMode !== "clamp") return;
+    texture.wrapU = Texture.CLAMP_ADDRESSMODE;
+    texture.wrapV = Texture.CLAMP_ADDRESSMODE;
+}
+
 function isJpegTexturePath(path: string): boolean {
     return /\.(jpe?g)(?:$|[?#])/i.test(path);
 }
@@ -966,7 +1272,8 @@ function selectTextureEntriesForMaterial(
     materialNameValue: string,
     manifest: ViewerPBRTextureManifest,
     sourceMaterial?: unknown,
-    allowGlobalTextureFallback = false
+    allowGlobalTextureFallback = false,
+    materialTextureAliases: ViewerPBRMaterialTextureAlias[] = []
 ): ViewerPBRTextureEntry[] {
     const supportedTextures = manifest.textures.filter((entry) => entry.slot !== "unknown");
     const sourceTextureMatches = sourceMaterial
@@ -991,6 +1298,16 @@ function selectTextureEntriesForMaterial(
         return chooseOneTexturePerSlot(exactMatches);
     }
 
+    const aliasKey = findViewerMaterialTextureAlias(materialNameValue, materialTextureAliases);
+    if (aliasKey) {
+        const aliasMatches = supportedTextures.filter((entry) =>
+            materialKeyMatchesAny(entry.materialKey, new Set([aliasKey]))
+        );
+        if (aliasMatches.length > 0) {
+            return chooseOneTexturePerSlot(aliasMatches);
+        }
+    }
+
     const materialKeys = new Set(supportedTextures.map((entry) => entry.materialKey));
     if (allowGlobalTextureFallback && materialKeys.size === 1 && supportedTextures.length === manifest.textures.length) {
         return chooseOneTexturePerSlot(supportedTextures);
@@ -1010,6 +1327,17 @@ function selectTextureEntriesForMaterial(
     }
 
     return [];
+}
+
+function findViewerMaterialTextureAlias(
+    materialNameValue: string,
+    materialTextureAliases: ViewerPBRMaterialTextureAlias[]
+): string | null {
+    const normalizedMaterialName = normalizePBRMaterialOverrideName(materialNameValue);
+    const alias = materialTextureAliases.find((entry) =>
+        normalizePBRMaterialOverrideName(entry.materialName) === normalizedMaterialName
+    );
+    return alias ? normalizeMaterialName(alias.textureMaterialKey) : null;
 }
 
 function getSourceMaterialTextureEntries(
@@ -1376,7 +1704,7 @@ function getViewerFeatureStats(result: ISceneLoaderAsyncResult): ViewerFeatureSt
         ).length;
         uvSetCount = Math.max(uvSetCount, meshUVSetCount);
 
-        if (mesh.isVerticesDataPresent(VertexBuffer.ColorKind)) {
+        if (mesh.useVertexColors && mesh.isVerticesDataPresent(VertexBuffer.ColorKind)) {
             hasVertexColors = true;
         }
 
@@ -1410,6 +1738,14 @@ function getViewerFeatureStats(result: ISceneLoaderAsyncResult): ViewerFeatureSt
         multiMaterialCount,
         alphaMaterialCount,
     };
+}
+
+function applyVertexColorUseOverride(result: ISceneLoaderAsyncResult, disableVertexColors: boolean): void {
+    if (!disableVertexColors) return;
+
+    for (const mesh of result.meshes) {
+        mesh.useVertexColors = false;
+    }
 }
 
 function materialUsesAlpha(material: PBRMaterial | StandardMaterial): boolean {
@@ -1449,6 +1785,9 @@ function getLoadedAssetTextureCount(
     for (const override of model.textures) {
         textureUrls.add(override.url);
     }
+    for (const preload of model.preloadTextures) {
+        textureUrls.add(preload.url);
+    }
 
     for (const mesh of result.meshes) {
         collectMaterialTextureUrls(mesh.material, textureUrls, folder, knownTextureUrls);
@@ -1469,6 +1808,9 @@ function getKnownAssetTextureUrls(
     }
     for (const override of model.textures) {
         urls.add(override.url);
+    }
+    for (const preload of model.preloadTextures) {
+        urls.add(preload.url);
     }
     return urls;
 }
@@ -1550,18 +1892,22 @@ async function loadModel(index: number) {
                 arrayBuffer,
                 rootUrl
             );
+            applyVertexColorUseOverride(currentResult, model.disableVertexColors ?? false);
 
             manifest = getViewerPBRManifest(model);
             pbrTextureCount = applyViewerPBRMaterials(
                 currentResult,
                 manifest,
-                model.forceOpaque ?? false
+                model.forceOpaque ?? false,
+                model.pbrMaterialTextureAliases ?? []
             );
             pbrTextureCount += applyPBRTextureOverrides(
                 model.textures,
                 model.forceOpaque ?? false
             );
             applyPBRMaterialOverrides(model.pbrMaterialOverrides ?? [], model.forceOpaque ?? false);
+            applyLineArtSiblingAlbedo(currentResult, model.lineArtAlbedoOverrides ?? []);
+            preloadViewerTextures(model.preloadTextures);
             assetTextureCount = getLoadedAssetTextureCount(currentResult, manifest, model);
 
             if (pbrTextureCount === 0) {
@@ -1740,6 +2086,7 @@ function createPBRTextureOverride(textureOverride: ViewerTextureOverride): Textu
     if (textureOverride.coordinatesIndex !== undefined) {
         texture.coordinatesIndex = textureOverride.coordinatesIndex;
     }
+    applyViewerTextureAddressMode(texture, textureOverride.addressMode);
     return texture;
 }
 
@@ -1791,6 +2138,42 @@ function applyPBRMaterialOverrides(
                 mat.roughness = override.roughness;
             }
 
+            if (override.alpha !== undefined) {
+                mat.alpha = override.alpha;
+            }
+
+            if (override.alphaCutOff !== undefined) {
+                mat.alphaCutOff = override.alphaCutOff;
+            }
+
+            if (override.clearOpacityTexture) {
+                clearPBRMaterialOpacityTexture(mat);
+            }
+
+            if (override.backFaceCulling !== undefined) {
+                mat.backFaceCulling = override.backFaceCulling;
+            }
+
+            if (override.forceIrradianceInFragment !== undefined) {
+                mat.forceIrradianceInFragment = override.forceIrradianceInFragment;
+            }
+
+            if (override.invertNormalMapX !== undefined) {
+                mat.invertNormalMapX = override.invertNormalMapX;
+            }
+
+            if (override.invertNormalMapY !== undefined) {
+                mat.invertNormalMapY = override.invertNormalMapY;
+            }
+
+            if (override.clearCoat) {
+                applyPBRClearCoatOverride(mat, override.clearCoat);
+            }
+
+            if (override.subSurface) {
+                applyPBRSubSurfaceOverride(mat, override.subSurface);
+            }
+
             if (!forceOpaque && override.useAlphaFromAlbedoTexture && mat.albedoTexture) {
                 mat.useAlphaFromAlbedoTexture = true;
                 mat.transparencyMode = PBRMaterial.PBRMATERIAL_ALPHABLEND;
@@ -1808,6 +2191,108 @@ function applyPBRMaterialOverrides(
     }
 }
 
+function applyLineArtSiblingAlbedo(
+    result: ISceneLoaderAsyncResult,
+    overrides: ViewerLineArtAlbedoOverride[]
+): void {
+    const clonesBySource = new Map<PBRMaterial, Map<BaseTexture, PBRMaterial>>();
+
+    for (const mesh of result.meshes) {
+        if (!(mesh.material instanceof MultiMaterial)) continue;
+
+        const subMaterials = mesh.material.subMaterials;
+        for (let i = 0; i < subMaterials.length; i++) {
+            const material = subMaterials[i];
+            if (!(material instanceof PBRMaterial)) continue;
+            if (material.albedoTexture || !isLineArtMaterialName(material.name)) continue;
+
+            const sibling = findTexturedSiblingMaterial(subMaterials, i);
+            if (!sibling?.albedoTexture) continue;
+
+            const override = findLineArtAlbedoOverride(material.name, sibling.albedoTexture.name, overrides);
+            const albedoTexture = override
+                ? getLineArtOverrideAlbedoTexture(override.albedoTexturePath)
+                : sibling.albedoTexture;
+            subMaterials[i] = getLineArtAlbedoClone(material, albedoTexture, clonesBySource);
+        }
+    }
+}
+
+function findTexturedSiblingMaterial(
+    subMaterials: (PBRMaterial | null)[],
+    materialIndex: number
+): PBRMaterial | null {
+    return subMaterials.find((subMaterial, index) =>
+        index !== materialIndex &&
+        subMaterial instanceof PBRMaterial &&
+        Boolean(subMaterial.albedoTexture) &&
+        !isLineArtMaterialName(subMaterial.name)
+    ) ?? null;
+}
+
+function findLineArtAlbedoOverride(
+    materialName: string,
+    siblingAlbedoTextureName: string,
+    overrides: ViewerLineArtAlbedoOverride[]
+): ViewerLineArtAlbedoOverride | null {
+    const normalizedMaterialName = normalizeLineArtAlbedoOverrideName(materialName);
+    const siblingFileName = getFileName(siblingAlbedoTextureName.replace(/\\/g, "/"));
+    return overrides.find((override) =>
+        normalizeLineArtAlbedoOverrideName(override.materialName) === normalizedMaterialName &&
+        getFileName(override.siblingAlbedoTexture.replace(/\\/g, "/")) === siblingFileName
+    ) ?? null;
+}
+
+function getLineArtOverrideAlbedoTexture(path: string): BaseTexture {
+    const fileName = getFileName(path);
+    const existing = scene.textures.find((texture) =>
+        texture.name === fileName ||
+        getFileName((texture.url ?? "").replace(/\\/g, "/")) === fileName
+    );
+    if (existing) return existing;
+
+    const texture = new Texture(assetUrl(path), scene);
+    texture.name = fileName;
+    texture.gammaSpace = true;
+    return texture;
+}
+
+function getLineArtAlbedoClone(
+    source: PBRMaterial,
+    albedoTexture: BaseTexture,
+    clonesBySource: Map<PBRMaterial, Map<BaseTexture, PBRMaterial>>
+): PBRMaterial {
+    let clonesByTexture = clonesBySource.get(source);
+    if (!clonesByTexture) {
+        clonesByTexture = new Map<BaseTexture, PBRMaterial>();
+        clonesBySource.set(source, clonesByTexture);
+    }
+
+    const existing = clonesByTexture.get(albedoTexture);
+    if (existing) return existing;
+
+    const clone = source.clone(`${source.name}_${textureNameStem(albedoTexture.name)}_Albedo`);
+    clone.albedoTexture = albedoTexture;
+    clone.albedoColor = new Color3(1, 1, 1);
+    clonesByTexture.set(albedoTexture, clone);
+    return clone;
+}
+
+function isLineArtMaterialName(name: string): boolean {
+    return /(^|[^a-z0-9])line[^a-z0-9]*art([^a-z0-9]|$)/i.test(name);
+}
+
+function normalizeLineArtAlbedoOverrideName(name: string): string {
+    return normalizeMaterialName(name.replace(/_pbr$/i, ""));
+}
+
+function textureNameStem(name: string): string {
+    return getFileName(name.replace(/\\/g, "/"))
+        .replace(/\.[^.]+$/g, "")
+        .replace(/[^a-z0-9]+/gi, "_")
+        .replace(/^_+|_+$/g, "") || "Texture";
+}
+
 function matchesPBRMaterialOverride(pbrMaterialName: string, overrideMaterialName: string): boolean {
     const normalizedPBRName = normalizePBRMaterialOverrideName(pbrMaterialName);
     const normalizedOverrideName = normalizePBRMaterialOverrideName(overrideMaterialName);
@@ -1815,7 +2300,79 @@ function matchesPBRMaterialOverride(pbrMaterialName: string, overrideMaterialNam
 }
 
 function normalizePBRMaterialOverrideName(name: string): string {
-    return normalizeMaterialName(name.replace(/_pbr$/i, ""));
+    return normalizeMaterialName(name
+        .replace(/_pbr$/i, "")
+        .replace(/_vertexcolor$/i, "")
+    );
+}
+
+function clearPBRMaterialOpacityTexture(material: PBRMaterial): void {
+    material.opacityTexture?.dispose();
+    material.opacityTexture = null;
+    material.useAlphaFromAlbedoTexture = false;
+}
+
+function applyPBRClearCoatOverride(material: PBRMaterial, override: ViewerPBRClearCoatOverride): void {
+    const clearCoat = material.clearCoat;
+
+    if (override.isEnabled !== undefined) {
+        clearCoat.isEnabled = override.isEnabled;
+    }
+
+    if (override.intensity !== undefined) {
+        clearCoat.intensity = override.intensity;
+    }
+
+    if (override.roughness !== undefined) {
+        clearCoat.roughness = override.roughness;
+    }
+
+    if (override.texturePath) {
+        clearCoat.texture?.dispose();
+        clearCoat.texture = createPBRDataTexture(override.texturePath);
+    }
+
+    if (override.textureRoughnessPath) {
+        clearCoat.textureRoughness?.dispose();
+        clearCoat.textureRoughness = createPBRDataTexture(override.textureRoughnessPath);
+        clearCoat.useRoughnessFromMainTexture = false;
+    }
+
+    if (override.bumpTexturePath) {
+        clearCoat.bumpTexture?.dispose();
+        clearCoat.bumpTexture = createPBRDataTexture(override.bumpTexturePath);
+        if (override.bumpTextureLevel !== undefined) {
+            clearCoat.bumpTexture.level = override.bumpTextureLevel;
+        }
+    }
+
+    if (override.bumpTextureScale !== undefined && clearCoat.bumpTexture) {
+        clearCoat.bumpTexture.uScale = override.bumpTextureScale;
+        clearCoat.bumpTexture.vScale = override.bumpTextureScale;
+    }
+}
+
+function applyPBRSubSurfaceOverride(material: PBRMaterial, override: ViewerPBRSubSurfaceOverride): void {
+    const subSurface = material.subSurface;
+
+    if (override.isRefractionEnabled !== undefined) {
+        subSurface.isRefractionEnabled = override.isRefractionEnabled;
+    }
+
+    if (override.refractionIntensity !== undefined) {
+        subSurface.refractionIntensity = override.refractionIntensity;
+    }
+
+    if (override.useAlbedoToTintRefraction !== undefined) {
+        subSurface.useAlbedoToTintRefraction = override.useAlbedoToTintRefraction;
+    }
+}
+
+function createPBRDataTexture(path: string): Texture {
+    const texture = new Texture(assetUrl(path), scene);
+    texture.name = getFileName(path);
+    texture.gammaSpace = false;
+    return texture;
 }
 
 function applyPBRTransparencyModeOverride(
@@ -1827,6 +2384,7 @@ function applyPBRTransparencyModeOverride(
         case "opaque":
             material.transparencyMode = PBRMaterial.PBRMATERIAL_OPAQUE;
             material.alpha = 1;
+            clearPBRMaterialOpacityTexture(material);
             material.needDepthPrePass = false;
             break;
         case "alphaTest":

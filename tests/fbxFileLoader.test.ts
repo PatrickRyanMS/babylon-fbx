@@ -26,6 +26,7 @@ const alfaRomeoPath = resolve(__dirname, "models/alfa-romeo-stradale-1967/finish
 const aishaPath = resolve(__dirname, "models/anime-chibi-girl-aisha-by-seraphim/test2.fbx");
 const behemotPath = resolve(__dirname, "models/behemot-cat/LowPoly_Cat_V04.fbx");
 const tamagotchiPath = resolve(__dirname, "models/tamagotchi-pet-sailor-moon/lp_01.fbx");
+const spartanPath = resolve(__dirname, "models/spartan-armour-mkv-halo-reach/Spartan_Sketchfab.fbx");
 
 describe("FBXFileLoader", () => {
     it("maps non-Y-up FBX scene axes into Babylon's Y-up basis", () => {
@@ -152,6 +153,22 @@ describe("FBXFileLoader", () => {
         expect(worldScale.x).toBeCloseTo(0.0922878854, 6);
         expect(worldScale.y).toBeCloseTo(0.0922878854, 6);
         expect(worldScale.z).toBeCloseTo(0.0922878854, 6);
+
+        scene.dispose();
+        engine.dispose();
+    });
+
+    it("does not instantiate unsupported Maya ShaderFX IBL texture references", async () => {
+        const engine = new NullEngine();
+        const scene = new Scene(engine);
+        const file = readFileSync(spartanPath);
+        const buffer = file.buffer.slice(file.byteOffset, file.byteOffset + file.byteLength);
+        const rootUrl = `${pathToFileURL(dirname(spartanPath)).href}/`;
+
+        await new FBXFileLoader().importMeshAsync(null, scene, buffer, rootUrl);
+
+        expect(scene.textures.some((texture) => texture.name.toLowerCase().endsWith(".dds"))).toBe(false);
+        expect(scene.materials.find((material) => material.name === "Spartan_Shoulders_Mat")).toBeInstanceOf(StandardMaterial);
 
         scene.dispose();
         engine.dispose();
@@ -378,27 +395,36 @@ describe("FBXFileLoader", () => {
         engine.dispose();
     });
 
+    it("uses glTF-style side orientation for FBX source meshes", () => {
+        const loader = new FBXFileLoader() as unknown as {
+            _createMesh: (model: FBXModelData, geomData: FBXGeometryData, scene: Scene) => Mesh;
+        };
+        const geomData = createTriangleGeometry();
+        const model = createModel({ geometry: geomData });
+
+        const leftHandedEngine = new NullEngine();
+        const leftHandedScene = new Scene(leftHandedEngine);
+        const leftHandedMesh = loader._createMesh(model, geomData, leftHandedScene);
+        expect(leftHandedMesh.sideOrientation).toBe(Material.ClockWiseSideOrientation);
+        leftHandedScene.dispose();
+        leftHandedEngine.dispose();
+
+        const rightHandedEngine = new NullEngine();
+        const rightHandedScene = new Scene(rightHandedEngine);
+        rightHandedScene.useRightHandedSystem = true;
+        const rightHandedMesh = loader._createMesh(model, geomData, rightHandedScene);
+        expect(rightHandedMesh.sideOrientation).toBe(Material.CounterClockWiseSideOrientation);
+        rightHandedScene.dispose();
+        rightHandedEngine.dispose();
+    });
+
     it("bakes geometric transforms with translation after rotation and scale", () => {
         const engine = new NullEngine();
         const scene = new Scene(engine);
         const loader = new FBXFileLoader() as unknown as {
             _createMesh: (model: FBXModelData, geomData: FBXGeometryData, scene: Scene) => Mesh;
         };
-        const geomData = {
-            id: 1n,
-            name: "SyntheticGeometry",
-            positions: new Float64Array([0, 0, 0, 1, 0, 0, 0, 1, 0]),
-            indices: new Uint32Array([0, 1, 2]),
-            normals: new Float64Array([0, 0, 1, 0, 0, 1, 0, 0, 1]),
-            uvs: null,
-            uvSets: [],
-            colors: null,
-            tangents: null,
-            binormals: null,
-            controlPointIndices: new Uint32Array([0, 1, 2]),
-            materialIndices: null,
-            diagnostics: [],
-        } satisfies FBXGeometryData;
+        const geomData = createTriangleGeometry();
         const model = createModel({
             geometry: geomData,
             geometricTranslation: [10, 0, 0],
@@ -489,6 +515,24 @@ describe("FBXFileLoader", () => {
         engine.dispose();
     });
 });
+
+function createTriangleGeometry(): FBXGeometryData {
+    return {
+        id: 1n,
+        name: "SyntheticGeometry",
+        positions: new Float64Array([0, 0, 0, 1, 0, 0, 0, 1, 0]),
+        indices: new Uint32Array([0, 1, 2]),
+        normals: new Float64Array([0, 0, 1, 0, 0, 1, 0, 0, 1]),
+        uvs: null,
+        uvSets: [],
+        colors: null,
+        tangents: null,
+        binormals: null,
+        controlPointIndices: new Uint32Array([0, 1, 2]),
+        materialIndices: null,
+        diagnostics: [],
+    };
+}
 
 function createModel(overrides: Partial<FBXModelData>): FBXModelData {
     return {

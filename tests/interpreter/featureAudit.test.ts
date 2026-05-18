@@ -17,6 +17,7 @@ const spiderPath = resolve(__dirname, "../models/spider-animated-character/Spide
 const tamagotchiPath = resolve(__dirname, "../models/tamagotchi-pet-sailor-moon/lp_01.fbx");
 const strongholdPath = resolve(__dirname, "../models/the-last-stronghold-animated/Floating_Gate_Chinese1.fbx");
 const vinoPath = resolve(__dirname, "../models/vino/SM_Vino.fbx");
+const spartanPath = resolve(__dirname, "../models/spartan-armour-mkv-halo-reach/Spartan_Sketchfab.fbx");
 
 describe("FBX feature audit fixtures", () => {
     it("identifies Behemot Cat as a multi-skin fixture with at most four influences per skin", () => {
@@ -90,6 +91,15 @@ describe("FBX feature audit fixtures", () => {
         expect(scene.materials.length).toBe(6);
         expect(scene.rootModels.flatMap((model) => model.children).length).toBeGreaterThanOrEqual(0);
         expect(scene.rootModels.some((model) => model.geometry || model.children.some((child) => child.geometry))).toBe(true);
+    });
+
+    it("preserves unsupported Maya ShaderFX IBL texture references in Spartan Armor", () => {
+        const scene = interpretFBX(loadDocument(spartanPath));
+        const textureRefs = scene.materials.flatMap((material) => material.textures);
+
+        expect(textureRefs.some((texture) => texture.relativeFileName.toLowerCase().endsWith(".dds"))).toBe(true);
+        expect(textureRefs.some((texture) => texture.propertyName.startsWith("Maya|TEX_global_"))).toBe(true);
+        expect(textureRefs.some((texture) => texture.propertyName === "Maya|TEX_brdf_lut")).toBe(true);
     });
 
     it("parses non-default InheritType and surfaces runtime-gated diagnostics", () => {

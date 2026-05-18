@@ -503,6 +503,9 @@ export class FBXFileLoader implements ISceneLoaderPluginAsync {
         skinBinding?: FBXSkinBindingData
     ): Mesh {
         const mesh = new Mesh(model.name, scene);
+        mesh.sideOrientation = scene.useRightHandedSystem
+            ? Material.CounterClockWiseSideOrientation
+            : Material.ClockWiseSideOrientation;
         const vertexData = new VertexData();
 
         // Convert Float64Array to Float32Array for Babylon
@@ -950,6 +953,10 @@ export class FBXFileLoader implements ISceneLoaderPluginAsync {
 
         // Apply textures
         for (const tex of matData.textures) {
+            if (!FBXFileLoader._isSupportedMaterialTextureSlot(tex.propertyName)) {
+                continue;
+            }
+
             // Use embedded texture data if available, otherwise load from URL
             let texture: Texture;
             if (tex.embeddedData) {
@@ -1044,6 +1051,32 @@ export class FBXFileLoader implements ISceneLoaderPluginAsync {
         }
 
         return material;
+    }
+
+    private static _isSupportedMaterialTextureSlot(propertyName: string): boolean {
+        switch (propertyName) {
+            case "DiffuseColor":
+            case "NormalMap":
+            case "NormalMapTexture":
+            case "normalCamera":
+            case "Bump":
+            case "BumpFactor":
+            case "EmissiveColor":
+            case "AmbientColor":
+            case "SpecularColor":
+            case "TransparencyFactor":
+            case "TransparentColor":
+            case "ReflectionColor":
+            case "ReflectionFactor":
+            case "DisplacementColor":
+            case "Displacement":
+            case "DisplacementFactor":
+            case "ShininessExponent":
+            case "Shininess":
+                return true;
+            default:
+                return false;
+        }
     }
 
     private static _createExternalTexture(texturePath: string, scene: Scene): Texture {
