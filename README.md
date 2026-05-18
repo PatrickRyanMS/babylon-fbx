@@ -130,6 +130,17 @@ The loader preserves several FBX features as diagnostics rather than fully evalu
 
 Diagnostics are exposed in interpreted scene data and, where relevant, Babylon metadata.
 
+Some unsupported or partial features should stay fixture-gated until there are targeted models with clear reference behavior. The current priority areas are:
+
+- Visibility: static model visibility, animated visibility curves, and per-polygon `LayerElementVisibility`.
+- Animation: layer blending plus non-TRS animated properties such as material, camera, and light curves.
+- Scene evaluation: runtime constraints, helper/control rigs, non-bind poses, and unsupported deformer subtypes such as cache or lattice-style deformation.
+- Skinning: additive/associate cluster semantics, including `TransformAssociateModel` and non-normalized cluster modes.
+- Materials: layered textures, richer PBR/material-extension graphs, transparency conventions, displacement/gloss/reflection semantics, and light/camera fidelity beyond the current basic mapping.
+- Geometry/runtime scale: smoothing-group normal generation, edge crease/subdivision data, harder concave n-gon triangulation cases, consistent `UnitScaleFactor` application, and legacy FBX 6 skinning/Takes animation.
+
+For the detailed unsupported-feature inventory and guidance on what models are needed to implement each feature safely, see [`reports/20260518_unsupported_feature_model_needs.md`](./reports/20260518_unsupported_feature_model_needs.md).
+
 ## Viewer
 
 Run the local viewer with:

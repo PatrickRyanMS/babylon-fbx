@@ -206,3 +206,4 @@ Viewer texture/status update: Chernovan Nemesis needed viewer-only texture overr
 - `reports\20260516_behemot_visual_bug.md` - current Behemot debugging path.
 - `reports\20260515_224503_fbx_rig_import_changelog.md` - rig resolver, skinning, bind-pose, and animation process notes.
 - `reports\20260518_inherit_type_2_helper_compensation.md` - Cloud Station `InheritType = 2` helper-bone root cause, implementation, and validation notes.
+- `reports\20260518_unsupported_feature_model_needs.md` - unsupported/partial FBX features that need targeted real or synthetic models before runtime support should be added.
