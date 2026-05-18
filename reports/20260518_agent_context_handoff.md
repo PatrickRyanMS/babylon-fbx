@@ -132,6 +132,8 @@ Known viewer-specific lessons:
 - The viewer blocks rendering during model switches by setting the active camera layer mask to `0`, not by disabling meshes. This keeps mesh bounds computable for camera framing, waits for active textures, then restores the original camera layer mask. A load-token guard prevents stale async loads from unblocking or replacing a newer model.
 - Viewer dropdown format labels are automatic for FBX/GLB pairs, but animation labels are intentionally not shown because the viewer does not preload every model to know animation presence up front.
 - The viewer stats pane now includes model/texture byte sizes plus total vertex and face counts to help correlate parse/load time with fixture complexity.
+- Viewer diagnostics reserve yellow/orange for real actionable gaps. Informational complexity callouts, such as Bristleback's multi-root skeleton, use a pink-purple info tone instead.
+- Single-shape blend-shape channels do not need `FullWeights`; if an exporter writes many `FullWeights` values for a single actual shape, ignore the mismatch rather than surfacing a diagnostic. This removed Quirky Series Animals' false high-priority `full-weights-mismatch` row while preserving multi-shape FullWeights validation.
 
 ## Known open or fragile areas
 

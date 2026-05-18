@@ -169,6 +169,10 @@ function normalizeFullWeights(
     }
 
     if (fullWeights.length !== shapes.length) {
+        if (shapes.length === 1) {
+            return null;
+        }
+
         diagnostics.push({
             type: "full-weights-mismatch",
             message: `FullWeights length ${fullWeights.length} does not match shape count ${shapes.length}; using the first shape for compatibility.`,

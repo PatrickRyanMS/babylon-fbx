@@ -14,6 +14,16 @@ describe("FBX blend shape in-betweens", () => {
         expect(Array.from(channel.shapes[1].vertices)).toEqual([1, 0, 0]);
         expect(channel.diagnostics).toEqual([]);
     });
+
+    it("ignores mismatched FullWeights when a channel has only one shape", () => {
+        const blendShapes = extractBlendShapes(resolveConnections(createSingleShapeFullWeightsDocument()));
+        const channel = blendShapes[0].channels[0];
+
+        expect(channel.fullWeights).toBeNull();
+        expect(channel.shapes).toHaveLength(1);
+        expect(Array.from(channel.shapes[0].vertices)).toEqual([1, 0, 0]);
+        expect(channel.diagnostics).toEqual([]);
+    });
 });
 
 function createBlendShapeDocument(): FBXDocument {
@@ -44,6 +54,38 @@ function createBlendShapeDocument(): FBXDocument {
                     createConnection("OO", 3n, 2n),
                     createConnection("OO", 4n, 3n),
                     createConnection("OO", 5n, 3n),
+                ],
+            },
+        ],
+    };
+}
+
+function createSingleShapeFullWeightsDocument(): FBXDocument {
+    return {
+        version: 7500,
+        nodes: [
+            {
+                name: "Objects",
+                properties: [],
+                children: [
+                    createObject("Geometry", 1n, "Geometry::Base", "Mesh"),
+                    createObject("Deformer", 2n, "Deformer::BlendShape", "BlendShape"),
+                    {
+                        ...createObject("Deformer", 3n, "SubDeformer::Blink", "BlendShapeChannel"),
+                        children: [
+                            { name: "FullWeights", properties: [{ type: "float64[]", value: new Float64Array([50, 100]) }], children: [] },
+                        ],
+                    },
+                    createShape(4n, [1, 0, 0]),
+                ],
+            },
+            {
+                name: "Connections",
+                properties: [],
+                children: [
+                    createConnection("OO", 2n, 1n),
+                    createConnection("OO", 3n, 2n),
+                    createConnection("OO", 4n, 3n),
                 ],
             },
         ],

@@ -1096,7 +1096,11 @@ function setStatusDetails(summary: string, rows: ViewerStatusRow[]): void {
 
     for (const row of rows) {
         const rowElement = document.createElement("div");
-        rowElement.className = row.alert ? "status-row status-alert" : "status-row";
+        rowElement.className = [
+            "status-row",
+            row.alert ? "status-alert" : "",
+            row.tone === "info" ? "status-info" : "",
+        ].filter(Boolean).join(" ");
 
         const labelElement = document.createElement("span");
         labelElement.className = "status-label";
@@ -2063,6 +2067,7 @@ interface ViewerStatusRow {
     label: string;
     value: string;
     alert?: boolean;
+    tone?: "info";
 }
 
 interface ViewerAssetSizeStats {
@@ -2380,7 +2385,11 @@ function buildViewerStatusRows(
 
     const skeletonSummary = formatSkeletonSummary(stats);
     if (skeletonSummary) {
-        rows.push({ label: "Skeletons", value: skeletonSummary, alert: stats.skeletonRootCount > stats.skeletonCount });
+        rows.push({
+            label: "Skeletons",
+            value: skeletonSummary,
+            tone: stats.skeletonRootCount > stats.skeletonCount ? "info" : undefined,
+        });
     }
 
     rows.push(...buildFBXDiagnosticRows(diagnostics));
@@ -2648,15 +2657,12 @@ function classifyFBXDiagnostic(entry: ViewerFBXDiagnosticEntry): ViewerDiagnosti
         case "unsupported-deformer":
         case "unsupported-pose":
         case "unsupported-layered-texture":
-        case "unsupported-curve-node":
         case "multiple-animation-layers":
         case "unsupported-layer-blend-mode":
         case "partial-layer-weight":
-        case "non-default-transform-inheritance":
         case "cluster-mode-runtime-unsupported":
         case "missing-cluster-transform":
         case "missing-cluster-transform-link":
-        case "missing-bind-pose-matrix":
         case "full-weights-mismatch":
         case "missing-full-weights":
         case "diagnostic-extraction-failed":
@@ -2667,11 +2673,14 @@ function classifyFBXDiagnostic(entry: ViewerFBXDiagnosticEntry): ViewerDiagnosti
         case "triangulation-fallback":
         case "layer-index-out-of-bounds":
         case "layer-data-too-short":
+        case "non-default-transform-inheritance":
             return "structure";
 
         case "unsupported-helper":
         case "unsupported-node-attribute":
         case "associate-model-present":
+        case "missing-bind-pose-matrix":
+        case "unsupported-curve-node":
         case "camera-diagnostic":
         case "light-diagnostic":
             return "metadata";
