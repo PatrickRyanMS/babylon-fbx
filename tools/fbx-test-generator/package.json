@@ -1,0 +1,15 @@
+{
+    "name": "fbx-test-generator",
+    "version": "1.0.0",
+    "private": true,
+    "type": "module",
+    "description": "Generates small, deterministic FBX test models (binary or ASCII) for FBX-loader regression and visual tests.",
+    "scripts": {
+        "generate": "node generate.mjs",
+        "validate": "node validate.mjs",
+        "render": "node render.mjs"
+    },
+    "dependencies": {
+        "fbx2gltf": "^0.9.7"
+    }
+}

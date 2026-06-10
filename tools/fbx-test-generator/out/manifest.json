@@ -1,0 +1,110 @@
+[
+  {
+    "file": "m01_cube_phong.fbx",
+    "format": "binary",
+    "version": 7500,
+    "bytes": 8992
+  },
+  {
+    "file": "m02_geo_ngons.fbx",
+    "format": "binary",
+    "version": 7500,
+    "bytes": 7504
+  },
+  {
+    "file": "m03_normals.fbx",
+    "format": "binary",
+    "version": 7500,
+    "bytes": 117504
+  },
+  {
+    "file": "m04_material_properties.fbx",
+    "format": "binary",
+    "version": 7500,
+    "bytes": 218624
+  },
+  {
+    "file": "m05_textures.fbx",
+    "format": "binary",
+    "version": 7500,
+    "bytes": 30752
+  },
+  {
+    "file": "m06_uv_transform.fbx",
+    "format": "binary",
+    "version": 7500,
+    "bytes": 7856
+  },
+  {
+    "file": "m07_multimaterial.fbx",
+    "format": "binary",
+    "version": 7500,
+    "bytes": 7552
+  },
+  {
+    "file": "m08_transforms.fbx",
+    "format": "binary",
+    "version": 7500,
+    "bytes": 38576
+  },
+  {
+    "file": "m09_skinning.fbx",
+    "format": "binary",
+    "version": 7500,
+    "bytes": 41728
+  },
+  {
+    "file": "m10_morph.fbx",
+    "format": "binary",
+    "version": 7500,
+    "bytes": 48176
+  },
+  {
+    "file": "m11_node_anim.fbx",
+    "format": "binary",
+    "version": 7500,
+    "bytes": 19808
+  },
+  {
+    "file": "m12_skeletal_anim.fbx",
+    "format": "binary",
+    "version": 7500,
+    "bytes": 44832
+  },
+  {
+    "file": "m13_morph_anim.fbx",
+    "format": "binary",
+    "version": 7500,
+    "bytes": 38160
+  },
+  {
+    "file": "m14_multiclip.fbx",
+    "format": "binary",
+    "version": 7500,
+    "bytes": 10416
+  },
+  {
+    "file": "m15_camera_lights.fbx",
+    "format": "binary",
+    "version": 7500,
+    "bytes": 47584
+  },
+  {
+    "file": "m16_axis_yup.fbx",
+    "format": "binary",
+    "version": 7500,
+    "bytes": 18400
+  },
+  {
+    "file": "m16_axis_zup.fbx",
+    "format": "binary",
+    "version": 7500,
+    "bytes": 18400
+  },
+  {
+    "file": "m16_units_254.fbx",
+    "format": "binary",
+    "version": 7500,
+    "bytes": 18400
+  }
+]
